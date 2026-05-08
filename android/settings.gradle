@@ -6,15 +6,12 @@ pluginManagement {
         gradlePluginPortal()
     }
 }
-
 plugins {
     id("com.facebook.react.settings")
 }
-
 extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
     ex.autolinkLibrariesFromCommand()
 }
-
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_PROJECT)
     repositories {
@@ -23,8 +20,8 @@ dependencyResolutionManagement {
         maven { url 'https://jitpack.io' }
         maven { url "$rootDir/../node_modules/react-native/android" }
         maven { url "https://maven.google.com" }
+        maven { url "$rootDir/../node_modules/.cache/default-development" }
     }
 }
-
 rootProject.name = 'SLTMobileApp'
 include ':app'

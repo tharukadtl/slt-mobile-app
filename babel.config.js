@@ -17,6 +17,7 @@ module.exports = {
           '@appTypes': './src/types',
           '@theme': './src/theme',
           '@assets': './src/assets',
+          '@config': './src/config',
         },
       },
     ],

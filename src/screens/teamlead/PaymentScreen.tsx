@@ -1,78 +1,116 @@
-import React, {useState} from 'react';
+import React from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  TextInput,
-  Alert,
 } from 'react-native';
 import {useNavigation} from '@react-navigation/native';
+import {StackNavigationProp} from '@react-navigation/stack';
+import {TeamLeadStackParamList} from '@appTypes/navigation.types';
 import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
+import {useAppSelector} from '@store/hooks';
+
+type PaymentNavigationProp = StackNavigationProp<TeamLeadStackParamList>;
 
 const PaymentScreen = () => {
-  const navigation = useNavigation();
-  const [amount, setAmount] = useState('');
-  const [description, setDescription] = useState('');
-  const [taskId, setTaskId] = useState('');
+  const navigation = useNavigation<PaymentNavigationProp>();
+  const {tasks} = useAppSelector(state => state.technician);
 
-  const handleSubmit = () => {
-    if (!amount || !description || !taskId) {
-      Alert.alert('Error', 'Please fill in all fields');
-      return;
-    }
-    Alert.alert('Success', 'Payment submitted for approval', [
-      {text: 'OK', onPress: () => navigation.goBack()},
-    ]);
-  };
+  const completedTasks = tasks.filter(
+    t => t.status === 'completed',
+  );
 
   return (
     <ScrollView style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Submit Payment</Text>
+        <Text style={styles.headerTitle}>Payments</Text>
+        <Text style={styles.headerSubtitle}>
+          Manage payment submissions
+        </Text>
       </View>
 
       <View style={styles.content}>
-        <Text style={styles.label}>Task ID *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Enter task ID"
-          placeholderTextColor={colors.textLight}
-          value={taskId}
-          onChangeText={setTaskId}
-        />
+        {/* Quick Actions */}
+        <Text style={styles.sectionTitle}>Quick Actions</Text>
+        <View style={styles.actionsGrid}>
+          <TouchableOpacity
+            style={[
+              styles.actionCard,
+              {backgroundColor: colors.primary},
+            ]}
+            onPress={() => navigation.navigate('PaymentHistory')}>
+            <Text style={styles.actionIcon}>📋</Text>
+            <Text style={styles.actionTitle}>Payment History</Text>
+            <Text style={styles.actionSubtitle}>
+              View all submissions
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.actionCard,
+              {backgroundColor: colors.success},
+            ]}
+            onPress={() => {
+              if (completedTasks.length > 0) {
+                navigation.navigate('PaymentSubmission', {
+                  taskId: completedTasks[0].id,
+                });
+              }
+            }}>
+            <Text style={styles.actionIcon}>💰</Text>
+            <Text style={styles.actionTitle}>New Submission</Text>
+            <Text style={styles.actionSubtitle}>
+              Submit payment
+            </Text>
+          </TouchableOpacity>
+        </View>
 
-        <Text style={styles.label}>Amount (LKR) *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Enter amount"
-          placeholderTextColor={colors.textLight}
-          value={amount}
-          onChangeText={setAmount}
-          keyboardType="numeric"
-        />
-
-        <Text style={styles.label}>Description *</Text>
-        <TextInput
-          style={[styles.input, styles.textArea]}
-          placeholder="Describe the payment"
-          placeholderTextColor={colors.textLight}
-          value={description}
-          onChangeText={setDescription}
-          multiline
-          numberOfLines={4}
-          textAlignVertical="top"
-        />
-
-        <TouchableOpacity style={styles.button} onPress={handleSubmit}>
-          <Text style={styles.buttonText}>Submit Payment</Text>
-        </TouchableOpacity>
+        {/* Completed Tasks Pending Payment */}
+        <Text style={styles.sectionTitle}>
+          Pending Submissions ({completedTasks.length})
+        </Text>
+        {completedTasks.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>✅</Text>
+            <Text style={styles.emptyText}>
+              No pending submissions
+            </Text>
+          </View>
+        ) : (
+          completedTasks.map(task => (
+            <View key={task.id} style={styles.taskCard}>
+              <View style={styles.taskInfo}>
+                <Text style={styles.taskId}>Task #{task.id}</Text>
+                <Text style={styles.taskCustomer}>
+                  👤 {task.customerName || 'Customer'}
+                </Text>
+                <Text style={styles.taskAddress} numberOfLines={1}>
+                  📍 {task.location?.address}
+                </Text>
+                <Text style={styles.taskDate}>
+                  📅 {task.scheduledDate}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.submitButton}
+                onPress={() =>
+                  navigation.navigate('PaymentSubmission', {
+                    taskId: task.id,
+                  })
+                }>
+                <Text style={styles.submitButtonText}>Submit</Text>
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
       </View>
     </ScrollView>
   );
@@ -99,40 +137,115 @@ const styles = StyleSheet.create({
     fontWeight: typography.bold,
     color: colors.white,
   },
+  headerSubtitle: {
+    fontSize: typography.md,
+    color: colors.white,
+    opacity: 0.8,
+    marginTop: spacing.xs,
+  },
   content: {
     padding: spacing.lg,
   },
-  label: {
-    fontSize: typography.md,
-    fontWeight: typography.medium,
+  sectionTitle: {
+    fontSize: typography.lg,
+    fontWeight: typography.bold,
     color: colors.textPrimary,
-    marginBottom: spacing.sm,
-    marginTop: spacing.md,
+    marginBottom: spacing.md,
+    marginTop: spacing.sm,
   },
-  input: {
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 8,
-    padding: spacing.md,
-    fontSize: typography.md,
-    color: colors.textPrimary,
-  },
-  textArea: {
-    height: 100,
-    paddingTop: spacing.md,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: spacing.md,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: spacing.xl,
+  actionsGrid: {
+    flexDirection: 'row',
+    gap: spacing.md,
     marginBottom: spacing.lg,
   },
-  buttonText: {
+  actionCard: {
+    flex: 1,
+    borderRadius: 12,
+    padding: spacing.md,
+    alignItems: 'center',
+  },
+  actionIcon: {
+    fontSize: 32,
+    marginBottom: spacing.sm,
+  },
+  actionTitle: {
+    fontSize: typography.md,
+    fontWeight: typography.bold,
     color: colors.white,
+    textAlign: 'center',
+  },
+  actionSubtitle: {
+    fontSize: typography.xs,
+    color: colors.white,
+    opacity: 0.8,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  emptyCard: {
+    backgroundColor: colors.white,
+    borderRadius: 8,
+    padding: spacing.xl,
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: colors.black,
+    shadowOffset: {width: 0, height: 1},
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+  },
+  emptyIcon: {
+    fontSize: 48,
+    marginBottom: spacing.md,
+  },
+  emptyText: {
     fontSize: typography.lg,
+    color: colors.textSecondary,
+  },
+  taskCard: {
+    backgroundColor: colors.white,
+    borderRadius: 8,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    elevation: 2,
+    shadowColor: colors.black,
+    shadowOffset: {width: 0, height: 1},
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+  },
+  taskInfo: {
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  taskId: {
+    fontSize: typography.md,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  taskCustomer: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginBottom: 2,
+  },
+  taskAddress: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginBottom: 2,
+  },
+  taskDate: {
+    fontSize: typography.xs,
+    color: colors.textLight,
+  },
+  submitButton: {
+    backgroundColor: colors.success,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 8,
+  },
+  submitButtonText: {
+    color: colors.white,
+    fontSize: typography.sm,
     fontWeight: typography.bold,
   },
 });

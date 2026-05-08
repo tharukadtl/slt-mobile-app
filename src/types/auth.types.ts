@@ -1,10 +1,24 @@
 export interface User {
   id: string;
+  username?: string;
   name: string;
   phone: string;
+  phoneNumber?: string;
   email?: string;
-  role: 'client' | 'technician' | 'teamlead';
+  address?: string;
+  role: 'client' | 'technician' | 'teamlead' | 'admin' | 'super_admin';
+  branchId?: number;
   profilePhoto?: string;
+  language?: string;
+  notificationPreferences?: NotificationPreferences;
+}
+
+export interface NotificationPreferences {
+  statusUpdates: boolean;
+  technicianAssigned: boolean;
+  jobCompleted: boolean;
+  billing: boolean;
+  promotions: boolean;
 }
 
 export interface AuthState {
@@ -35,4 +49,12 @@ export interface AuthResponse {
   fullName: string;
   branchId: number;
   expiresIn: number;
+  phoneNumber?: string;
+}
+
+export interface UpdateProfileRequest {
+  fullName: string;
+  email: string;
+  language: string;
+  notificationPreferences: NotificationPreferences;
 }

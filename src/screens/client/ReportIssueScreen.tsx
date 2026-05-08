@@ -15,14 +15,22 @@ import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {createIssue} from '@store/slices/issueSlice';
+import PhotoPicker from '@components/common/PhotoPicker';
+import LocationPicker from '@components/common/LocationPicker';
 
 const CATEGORIES = [
-  {label: 'Broadband', value: 'broadband'},
-  {label: 'Telephone', value: 'telephone'},
-  {label: 'Fiber', value: 'fiber'},
-  {label: 'Television', value: 'television'},
-  {label: 'Other', value: 'other'},
+  {label: 'Broadband', value: 'broadband', icon: '🌐'},
+  {label: 'Telephone', value: 'telephone', icon: '📞'},
+  {label: 'Fiber', value: 'fiber', icon: '🔌'},
+  {label: 'Television', value: 'television', icon: '📺'},
+  {label: 'Other', value: 'other', icon: '🔧'},
 ];
+
+interface LocationData {
+  address: string;
+  latitude: number;
+  longitude: number;
+}
 
 const ReportIssueScreen = () => {
   const navigation = useNavigation();
@@ -32,11 +40,16 @@ const ReportIssueScreen = () => {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
-  const [address, setAddress] = useState('');
+  const [location, setLocation] = useState<LocationData | null>(null);
+  const [photos, setPhotos] = useState<string[]>([]);
 
   const handleSubmit = async () => {
-    if (!title || !description || !category || !address) {
-      Alert.alert('Error', 'Please fill in all fields');
+    if (!title || !description || !category) {
+      Alert.alert('Error', 'Please fill in all required fields');
+      return;
+    }
+    if (!location) {
+      Alert.alert('Error', 'Please select your service location');
       return;
     }
 
@@ -45,12 +58,17 @@ const ReportIssueScreen = () => {
         title,
         description,
         category: category as any,
-        location: {address, latitude: 0, longitude: 0},
+        photos,
+        location: {
+          address: location.address,
+          latitude: location.latitude,
+          longitude: location.longitude,
+        },
       }),
     );
 
     if (createIssue.fulfilled.match(result)) {
-      Alert.alert('Success', 'Issue reported successfully', [
+      Alert.alert('Success', 'Issue reported successfully!', [
         {text: 'OK', onPress: () => navigation.goBack()},
       ]);
     } else {
@@ -66,6 +84,9 @@ const ReportIssueScreen = () => {
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Report New Issue</Text>
+        <Text style={styles.headerSubtitle}>
+          Fill in the details below
+        </Text>
       </View>
 
       <View style={styles.form}>
@@ -90,6 +111,7 @@ const ReportIssueScreen = () => {
                 category === cat.value && styles.categoryButtonActive,
               ]}
               onPress={() => setCategory(cat.value)}>
+              <Text style={styles.categoryIcon}>{cat.icon}</Text>
               <Text
                 style={[
                   styles.categoryText,
@@ -114,21 +136,34 @@ const ReportIssueScreen = () => {
           textAlignVertical="top"
         />
 
-        {/* Address */}
-        <Text style={styles.label}>Address *</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Service address"
-          placeholderTextColor={colors.textLight}
-          value={address}
-          onChangeText={setAddress}
+        {/* Location Picker */}
+        <LocationPicker
+          location={location}
+          onLocationChange={setLocation}
+        />
+
+        {/* Photo Upload */}
+        <PhotoPicker
+          photos={photos}
+          onPhotosChange={setPhotos}
+          maxPhotos={3}
         />
 
         {/* Submit Button */}
         <TouchableOpacity
-          style={styles.submitButton}
+          style={[
+            styles.submitButton,
+            (!title || !description || !category || !location) &&
+              styles.submitButtonDisabled,
+          ]}
           onPress={handleSubmit}
-          disabled={isLoading}>
+          disabled={
+            isLoading ||
+            !title ||
+            !description ||
+            !category ||
+            !location
+          }>
           {isLoading ? (
             <ActivityIndicator color={colors.white} />
           ) : (
@@ -160,6 +195,12 @@ const styles = StyleSheet.create({
     fontSize: typography.xxl,
     fontWeight: typography.bold,
     color: colors.white,
+  },
+  headerSubtitle: {
+    fontSize: typography.md,
+    color: colors.white,
+    opacity: 0.8,
+    marginTop: spacing.xs,
   },
   form: {
     padding: spacing.lg,
@@ -198,10 +239,16 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.white,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   categoryButtonActive: {
     backgroundColor: colors.primary,
     borderColor: colors.primary,
+  },
+  categoryIcon: {
+    fontSize: 16,
   },
   categoryText: {
     fontSize: typography.sm,
@@ -218,6 +265,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: spacing.xl,
     marginBottom: spacing.lg,
+  },
+  submitButtonDisabled: {
+    backgroundColor: colors.textLight,
   },
   submitButtonText: {
     color: colors.white,

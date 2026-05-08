@@ -12,7 +12,8 @@
       "@utils/*": ["src/utils/*"],
       "@appTypes/*": ["src/types/*"],
       "@theme/*": ["src/theme/*"],
-      "@assets/*": ["src/assets/*"]
+      "@assets/*": ["src/assets/*"],
+      "@config/*": ["src/config/*"]
     },
     "ignoreDeprecations": "6.0"
   }

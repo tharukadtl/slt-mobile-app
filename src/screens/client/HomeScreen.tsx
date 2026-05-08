@@ -15,6 +15,8 @@ import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {fetchIssues} from '@store/slices/issueSlice';
+import NotificationBell from '@components/common/NotificationBell';
+import useNotifications from '@hooks/useNotifications';
 
 type HomeNavigationProp = StackNavigationProp<ClientStackParamList>;
 
@@ -23,6 +25,8 @@ const HomeScreen = () => {
   const dispatch = useAppDispatch();
   const {user} = useAppSelector(state => state.auth);
   const {issues, isLoading} = useAppSelector(state => state.issues);
+
+  useNotifications();
 
   useEffect(() => {
     dispatch(fetchIssues());
@@ -61,10 +65,13 @@ const HomeScreen = () => {
           <Text style={styles.welcomeText}>Welcome back,</Text>
           <Text style={styles.nameText}>{user?.name || 'Customer'}</Text>
         </View>
-        <View style={styles.avatarPlaceholder}>
-          <Text style={styles.avatarText}>
-            {user?.name?.charAt(0) || 'C'}
-          </Text>
+        <View style={styles.headerRight}>
+          <NotificationBell />
+          <View style={styles.avatarPlaceholder}>
+            <Text style={styles.avatarText}>
+              {user?.name?.charAt(0) || 'C'}
+            </Text>
+          </View>
         </View>
       </View>
 
@@ -122,6 +129,7 @@ const HomeScreen = () => {
 
         {issues.length === 0 && !isLoading && (
           <View style={styles.emptyState}>
+            <Text style={styles.emptyIcon}>📋</Text>
             <Text style={styles.emptyText}>No issues reported yet</Text>
             <Text style={styles.emptySubText}>
               Tap the button above to report an issue
@@ -156,6 +164,11 @@ const styles = StyleSheet.create({
     fontSize: typography.xl,
     fontWeight: typography.bold,
     color: colors.white,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   avatarPlaceholder: {
     width: 45,
@@ -260,6 +273,10 @@ const styles = StyleSheet.create({
   emptyState: {
     alignItems: 'center',
     paddingVertical: spacing.xl,
+  },
+  emptyIcon: {
+    fontSize: 48,
+    marginBottom: spacing.md,
   },
   emptyText: {
     fontSize: typography.lg,

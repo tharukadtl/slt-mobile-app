@@ -3,17 +3,17 @@ import {Task} from '@appTypes/technician.types';
 
 const technicianService = {
   getTasks: async (): Promise<Task[]> => {
-    const response = await api.get('/technician/tasks');
+    const response = await api.get('/api/jobs/my');
     return response.data;
   },
 
   getTaskById: async (id: string): Promise<Task> => {
-    const response = await api.get(`/technician/tasks/${id}`);
+    const response = await api.get(`/api/jobs/${id}`);
     return response.data;
   },
 
   updateTaskStatus: async (id: string, status: string): Promise<Task> => {
-    const response = await api.patch(`/technician/tasks/${id}/status`, {
+    const response = await api.patch(`/api/jobs/${id}/status`, {
       status,
     });
     return response.data;
@@ -23,21 +23,28 @@ const technicianService = {
     latitude: number,
     longitude: number,
   ): Promise<void> => {
-    await api.post('/technician/location', {latitude, longitude});
+    await api.post('/api/location/update', {latitude, longitude});
   },
 
   submitMaterials: async (
     taskId: string,
     materials: any[],
   ): Promise<void> => {
-    await api.post(`/technician/tasks/${taskId}/materials`, {materials});
+    for (const m of materials) {
+      await api.post(`/api/jobs/${taskId}/materials`, {
+        materialId:   m.materialId,
+        quantityUsed: m.quantityUsed ?? m.quantity,
+        chargeType:   m.chargeType,
+        justification: m.justification,
+      });
+    }
   },
 
   submitSignature: async (
     taskId: string,
     signature: string,
   ): Promise<void> => {
-    await api.post(`/technician/tasks/${taskId}/signature`, {signature});
+    await api.post(`/api/jobs/${taskId}/signature`, {signature});
   },
 };
 
