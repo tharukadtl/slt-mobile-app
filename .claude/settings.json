@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Project/slt/frontend-admin/**)"
+    ]
+  }
+}

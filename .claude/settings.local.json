@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.tsx$\")"
+    ],
+    "additionalDirectories": [
+      "C:\\Project\\slt\\fieldops\\src\\main\\java\\lk\\slt\\fieldops\\service"
+    ]
+  }
+}

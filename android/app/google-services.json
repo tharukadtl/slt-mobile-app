@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "672425940089",
+    "project_id": "sltmobileapp-3eab4",
+    "storage_bucket": "sltmobileapp-3eab4.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:672425940089:android:f0611b4b13eee9f8a0f0a8",
+        "android_client_info": {
+          "package_name": "com.sltmobileapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB8a49qtTM9K7Jcda76YjvSkOACgid9Azo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
