@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
-  Linking,
   Alert,
 } from 'react-native';
 import {useNavigation, useRoute, RouteProp} from '@react-navigation/native';
@@ -59,12 +58,6 @@ const TechnicianTrackingScreen = () => {
     setIsRefreshing(true);
     await dispatch(fetchTechnicianLocation(issueId));
     setIsRefreshing(false);
-  };
-
-  const handleCallTechnician = () => {
-    if (technicianLocation?.technicianPhone) {
-      Linking.openURL(`tel:${technicianLocation.technicianPhone}`);
-    }
   };
 
   const handleFitMap = () => {
@@ -227,11 +220,6 @@ const TechnicianTrackingScreen = () => {
                 Updated: {technicianLocation.lastUpdated}
               </Text>
             </View>
-            <TouchableOpacity
-              style={styles.callButton}
-              onPress={handleCallTechnician}>
-              <Text style={styles.callButtonText}>📞 Call</Text>
-            </TouchableOpacity>
           </View>
 
           {/* Fit Map Button */}
@@ -400,17 +388,6 @@ const styles = StyleSheet.create({
     fontSize: typography.xs,
     color: colors.textLight,
     marginTop: 2,
-  },
-  callButton: {
-    backgroundColor: colors.success,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: 8,
-  },
-  callButtonText: {
-    color: colors.white,
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
   },
   fitMapButton: {
     position: 'absolute',
