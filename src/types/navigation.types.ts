@@ -32,12 +32,20 @@ export type TechnicianTabParamList = {
 };
 
 export type TechnicianStackParamList = {
+  BODGate: undefined;
   TechnicianTabs: undefined;
+  BOD: undefined;
   TaskDetail: {taskId: string};
   Navigation: {taskId: string};
+  JobsMap: undefined;
   UpdateStatus: {taskId: string};
   Materials: {taskId: string};
-  Signature: {taskId: string};
+  Signature: {
+    taskId: string;
+    completionPhotoUrls: string;
+    completionRemarks?: string;
+    causeOfFault?: string;
+  };
   ResourceManagement: undefined;
   KPITargets: undefined;
   TechEditProfile: undefined;
@@ -57,7 +65,10 @@ export type TeamLeadStackParamList = {
   TeamLeadTabs: undefined;
   BOD: undefined;
   EOD: undefined;
-  AssignJobs: undefined;
+  // Optional pre-selection params: when a Team Lead taps "Reassign" on a job in
+  // the Needs Attention queue, AssignJobs opens scrolled to / highlighting that
+  // job's fault. Opened with no params from the header "Assign" button.
+  AssignJobs: {jobId?: string; faultId?: string} | undefined;
   Payment: undefined;
   PaymentSubmission: {taskId: string};
   PaymentHistory: undefined;
@@ -71,4 +82,8 @@ export type TeamLeadStackParamList = {
     longitude: number;
   };
   MaterialRequest: {taskId: string};
+  // SRS 5.5.3 (v1.9) — Work-Group-scoped material distribution: approve/reject
+  // pending requests from this Team Lead's own Work Group, drawing from its
+  // OPMC-allocated balance.
+  TeamMaterialRequests: undefined;
 };

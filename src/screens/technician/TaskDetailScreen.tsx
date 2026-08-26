@@ -20,6 +20,7 @@ import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {fetchTasks, updateTaskStatus} from '@store/slices/technicianSlice';
+import uploadService from '@services/uploadService';
 import {
   launchCamera,
   launchImageLibrary,
@@ -83,6 +84,10 @@ const TechnicianTaskDetailScreen = () => {
   const task = tasks.find(t => t.id === taskId);
 
   const [workNotes, setWorkNotes] = useState(task?.notes || '');
+  // Distinct from workNotes (general observations, visible/editable at every status) --
+  // this specifically answers "what caused the fault", written to Job.causeOfFault/
+  // Fault.causeOfFault only on completion (JobService.java's COMPLETED branch).
+  const [causeOfFault, setCauseOfFault] = useState('');
   const [beforePhotos, setBeforePhotos] = useState<string[]>([]);
   const [afterPhotos, setAfterPhotos] = useState<string[]>([]);
   const [usedMaterials, setUsedMaterials] = useState<UsedMaterial[]>([]);
@@ -222,54 +227,67 @@ const TechnicianTaskDetailScreen = () => {
 
   const handleUpdateStatus = async (newStatus: string) => {
     if (!task) return;
-    setIsUpdating(true);
+
     if (newStatus === 'in_progress') {
       setStartTime(new Date());
     }
-    if (newStatus === 'completed') {
-      if (afterPhotos.length === 0) {
-        Alert.alert(
-          'After Photos Required',
-          'Please add at least one after photo before completing',
-          [
-            {text: 'Cancel', style: 'cancel'},
-            {
-              text: 'Skip',
-              onPress: async () => {
-                const result = await dispatch(
-                  updateTaskStatus({id: task.id, status: newStatus}),
-                );
-                setIsUpdating(false);
-                if (updateTaskStatus.fulfilled.match(result)) {
-                  Alert.alert(
-                    '✅ Job Completed!',
-                    'Great work! Job has been marked as complete.',
-                    [{text: 'OK', onPress: () => navigation.goBack()}],
-                  );
-                }
-              },
-            },
-          ],
-        );
-        setIsUpdating(false);
+
+    // Server hard-requires at least one after-photo to complete a job
+    // (see JobService.updateJobStatus) — there is no valid "skip" path.
+    if (newStatus === 'completed' && afterPhotos.length === 0) {
+      Alert.alert(
+        'After Photos Required',
+        'Please add at least one after photo before completing this job.',
+      );
+      return;
+    }
+
+    setIsUpdating(true);
+    try {
+      if (newStatus === 'completed') {
+        // Completing a job requires a real customer signature (FR-9). Upload
+        // the after-photos here, then hand off to the Signature screen —
+        // it captures the signature and only then performs the actual
+        // COMPLETED status update, so a job can never reach COMPLETED
+        // without one.
+        const urls = await uploadService.uploadPhotos(afterPhotos);
+        navigation.navigate('Signature', {
+          taskId: task.id,
+          completionPhotoUrls: urls.join(','),
+          ...(workNotes ? {completionRemarks: workNotes} : {}),
+          ...(causeOfFault ? {causeOfFault} : {}),
+        });
         return;
       }
-    }
-    const result = await dispatch(
-      updateTaskStatus({id: task.id, status: newStatus}),
-    );
-    setIsUpdating(false);
-    if (updateTaskStatus.fulfilled.match(result)) {
-      const messages: Record<string, string> = {
-        accepted: 'Job accepted! Navigate to customer location.',
-        travelling: 'Status updated — travelling to job site.',
-        in_progress: 'Work started! Timer is running.',
-        completed: 'Excellent! Job marked as complete.',
-      };
-      Alert.alert(
-        '✅ Status Updated',
-        messages[newStatus] || 'Status updated successfully',
+
+      const result = await dispatch(
+        updateTaskStatus({
+          id: task.id,
+          status: newStatus,
+          ...(workNotes ? {workNotes} : {}),
+        }),
       );
+
+      if (updateTaskStatus.fulfilled.match(result)) {
+        const messages: Record<string, string> = {
+          accepted: 'Job accepted! Navigate to customer location.',
+          travelling: 'Status updated — travelling to job site.',
+          in_progress: 'Work started! Timer is running.',
+        };
+        Alert.alert(
+          '✅ Status Updated',
+          messages[newStatus] || 'Status updated successfully',
+        );
+      } else {
+        Alert.alert(
+          'Update Failed',
+          (result.payload as string) || 'Could not update job status.',
+        );
+      }
+    } catch (error: any) {
+      Alert.alert('Upload Failed', error.message || 'Could not upload photos.');
+    } finally {
+      setIsUpdating(false);
     }
   };
 
@@ -568,6 +586,25 @@ const TechnicianTaskDetailScreen = () => {
           />
           <Text style={styles.notesCharCount}>
             {workNotes.length} characters
+          </Text>
+        </View>
+
+        {/* Cause Identified — distinct from Work Notes above; specifically what
+            caused the fault, recorded on completion (Job/Fault.causeOfFault). */}
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>🔍 What did you find?</Text>
+          <TextInput
+            style={styles.notesInput}
+            placeholder="e.g. Damaged cable, faulty ONT, loose connector..."
+            placeholderTextColor={colors.textLight}
+            value={causeOfFault}
+            onChangeText={setCauseOfFault}
+            multiline
+            numberOfLines={3}
+            textAlignVertical="top"
+          />
+          <Text style={styles.notesCharCount}>
+            {causeOfFault.length} characters
           </Text>
         </View>
 
