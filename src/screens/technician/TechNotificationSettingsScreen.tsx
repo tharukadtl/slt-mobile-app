@@ -49,6 +49,11 @@ const TechNotificationSettingsScreen = () => {
       Alert.alert('Success', 'Notification settings saved', [
         {text: 'OK', onPress: () => navigation.goBack()},
       ]);
+    } else {
+      Alert.alert(
+        'Error',
+        (result.payload as string) || 'Failed to save settings. Please try again.',
+      );
     }
   };
 

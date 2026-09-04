@@ -103,17 +103,21 @@ const authService = {
   updateProfile: async (
     data: UpdateProfileRequest,
   ): Promise<UpdateProfileRequest> => {
-    await api.patch('/api/users/profile', {
-      full_name: data.fullName,
+    const response = await api.patch('/api/users/profile', {
+      fullName: data.fullName,
       email: data.email,
-      preferred_language: data.language,
+      language: data.language,
+      notificationPreferences: data.notificationPreferences,
     });
     const stored = await AsyncStorage.getItem('user');
     if (stored) {
       const user = JSON.parse(stored);
-      await AsyncStorage.setItem('user', JSON.stringify({...user, ...data}));
+      await AsyncStorage.setItem(
+        'user',
+        JSON.stringify({...user, ...response.data}),
+      );
     }
-    return data;
+    return response.data;
   },
 };
 

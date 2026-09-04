@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Read(//c/Project/slt/frontend-admin/**)"
+      "Read(//c/Project/slt/frontend-admin/**)",
+      "Bash(grep -E \"\\\\.\\(java|ts|tsx\\)$\")"
     ]
   }
 }

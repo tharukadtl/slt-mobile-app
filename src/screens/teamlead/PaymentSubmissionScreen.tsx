@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect, useState} from 'react';
 import {
   View,
   Text,
@@ -36,12 +36,64 @@ const STEPS = [
   {id: 4, label: 'Signature'},
 ];
 
+// Backend rejects this literal (and blank/null) at the point of capture —
+// see JobController.submitSignature — but a payment must never carry it
+// through to approval either, so it's checked again here as a second gate.
+const PLACEHOLDER_SIGNATURE = 'signature_placeholder';
+
 const PaymentSubmissionScreen = () => {
   const navigation = useNavigation<PaymentSubmissionNavigationProp>();
   const route = useRoute<PaymentSubmissionRouteProp>();
   const {taskId} = route.params;
 
   const [currentStep, setCurrentStep] = useState(1);
+
+  // Customer signature is captured once, by the Technician, at job
+  // completion (SRS 5.3.1.3) — the Team Lead receives it here, never
+  // re-collects it. null = still loading; '' = job has none on record.
+  const [technicianSignature, setTechnicianSignature] = useState<
+    string | null
+  >(null);
+
+  // SRS 5.3.1.3 (FR-9) — if the client was unavailable or declined to sign,
+  // the job still completed but is flagged for review here. This is
+  // informational only: the Team Lead can see it and still submit (see
+  // Step4Signature) — it never blocks submission.
+  const [needsTeamLeadReview, setNeedsTeamLeadReview] = useState(false);
+  const [signatureDeclineReason, setSignatureDeclineReason] = useState('');
+
+  // Step 4 - Signature (declared here, above the fetch effect below, since
+  // that effect pre-populates customerName once the job loads).
+  const [customerName, setCustomerName] = useState('');
+  const [customerAgreed, setCustomerAgreed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await api.get(`/api/jobs/${taskId}`);
+        if (!cancelled) {
+          setTechnicianSignature(response.data?.completionSignature || '');
+          setNeedsTeamLeadReview(Boolean(response.data?.needsTeamLeadReview));
+          setSignatureDeclineReason(response.data?.signatureDeclineReason || '');
+          // SRS 5.3.1.3 — client name is attached to the job record and
+          // forwarded automatically; pre-populated here rather than retyped
+          // from scratch, but left editable (the signer may be "an
+          // authorised representative" rather than the account customer).
+          if (response.data?.customerName) {
+            setCustomerName(response.data.customerName);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setTechnicianSignature('');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [taskId]);
 
   // Step 1 - Materials
   const [materials, setMaterials] = useState<PaymentMaterial[]>([]);
@@ -59,12 +111,6 @@ const PaymentSubmissionScreen = () => {
   // Step 3 - Justification
   const [justification, setJustification] = useState('');
   const [justificationPhotos, setJustificationPhotos] = useState<string[]>([]);
-
-
-  // Step 4 - Signature
-  const [customerName, setCustomerName] = useState('');
-  const [customerSignature, setCustomerSignature] = useState('');
-  const [customerAgreed, setCustomerAgreed] = useState(false);
 
   // Calculations
   const materialsFOC = materials
@@ -117,6 +163,18 @@ const PaymentSubmissionScreen = () => {
     }
   };
 
+  // "HH:MM" (from Step2Labor's time picker) -> today's ISO LocalDateTime,
+  // since SubmitPaymentRequest.labourStartTime/EndTime are full timestamps.
+  const toIsoDateTime = (hhmm: string): string | undefined => {
+    if (!hhmm) return undefined;
+    const [hour, minute] = hhmm.split(':').map(Number);
+    const d = new Date();
+    d.setHours(hour, minute, 0, 0);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+      d.getDate(),
+    ).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`;
+  };
+
   const handleSubmit = async () => {
     if (!customerAgreed) {
       Alert.alert(
@@ -125,8 +183,18 @@ const PaymentSubmissionScreen = () => {
       );
       return;
     }
-    if (!customerSignature) {
-      Alert.alert('Error', 'Customer signature is required');
+    // A literal placeholder value is never legitimate — distinct from a
+    // genuinely missing/declined signature, which no longer blocks
+    // submission at all (SRS 5.3.1.3 / FR-9): if the client was unavailable
+    // or declined to sign, that is flagged for review (see the banner
+    // Step4Signature renders from needsTeamLeadReview/signatureDeclineReason)
+    // and the Team Lead can see it and still proceed, matching the spec's
+    // actual intent ("flagged for review", not blocked).
+    if (technicianSignature === PLACEHOLDER_SIGNATURE) {
+      Alert.alert(
+        'Error',
+        'This job carries an invalid placeholder signature value. Contact support before submitting.',
+      );
       return;
     }
 
@@ -139,18 +207,45 @@ const PaymentSubmissionScreen = () => {
           text: 'Submit',
           onPress: async () => {
             try {
-              await api.post('/api/payments', {
+              // Send the raw labour start/end time + hourly rate — the server
+              // recomputes labourCharge from these instead of trusting the
+              // client-calculated total (see SubmitPaymentRequest javadoc).
+              const labourStartTime = toIsoDateTime(labor.startTime);
+              const labourEndTime = toIsoDateTime(labor.endTime);
+
+              const response = await api.post('/api/payments', {
                 jobId: Number(taskId),
                 materialsFocTotal: materialsFOC,
                 materialsChargeableTotal: materialsChargeable,
                 labourCharge: laborCharges,
-                customerSignatureUrl: customerSignature,
+                ...(labourStartTime ? {labourStartTime} : {}),
+                ...(labourEndTime ? {labourEndTime} : {}),
+                ...(labor.hourlyRate ? {hourlyRate: labor.hourlyRate} : {}),
+                customerSignatureUrl: technicianSignature,
                 materialJustification: justification,
                 workSummary: justification,
               });
+
+              // The server returns the saved Payment (id + paymentNumber +
+              // status). Treat the submission as successful only if that
+              // payment actually came back — never assume success.
+              const payment = response?.data;
+              if (!payment?.id) {
+                Alert.alert(
+                  'Submission Failed',
+                  'The server did not confirm the payment. Check the payment list before submitting again.',
+                );
+                return;
+              }
+
+              const reference = payment.paymentNumber
+                ? `${payment.paymentNumber} (#${payment.id})`
+                : `#${payment.id}`;
               Alert.alert(
                 'Success',
-                'Payment submitted successfully for admin review',
+                `Payment ${reference} submitted successfully for admin review.\n\nStatus: ${
+                  payment.status || 'PENDING'
+                }`,
                 [{text: 'OK', onPress: () => navigation.navigate('TeamLeadTabs')}],
               );
             } catch (e: any) {
@@ -203,8 +298,9 @@ const PaymentSubmissionScreen = () => {
           <Step4Signature
             customerName={customerName}
             onCustomerNameChange={setCustomerName}
-            customerSignature={customerSignature}
-            onSignatureChange={setCustomerSignature}
+            technicianSignature={technicianSignature}
+            needsTeamLeadReview={needsTeamLeadReview}
+            signatureDeclineReason={signatureDeclineReason}
             customerAgreed={customerAgreed}
             onAgreedChange={setCustomerAgreed}
             materialsFOC={materialsFOC}
@@ -298,11 +394,15 @@ const PaymentSubmissionScreen = () => {
           <TouchableOpacity
             style={[
               styles.submitButton,
-              (!customerAgreed || !customerSignature) &&
+              (!customerAgreed ||
+                technicianSignature === PLACEHOLDER_SIGNATURE) &&
                 styles.submitButtonDisabled,
             ]}
             onPress={handleSubmit}
-            disabled={!customerAgreed || !customerSignature}>
+            disabled={
+              !customerAgreed ||
+              technicianSignature === PLACEHOLDER_SIGNATURE
+            }>
             <Text style={styles.submitButtonText}>Submit Payment</Text>
           </TouchableOpacity>
         )}

@@ -2,8 +2,14 @@ import {createSlice, createAsyncThunk} from '@reduxjs/toolkit';
 import {
   TechnicianState,
   PaymentHistoryItem,
+  TodayAttendance,
 } from '@appTypes/technician.types';
 import api from '@services/api';
+import offlineQueue from '@services/offlineQueue';
+
+// Marker returned by thunks whose payload was held on-device instead of being
+// dropped, so screens can tell "saved, will send later" apart from "failed".
+export const QUEUED_OFFLINE = 'QUEUED_OFFLINE';
 
 const initialState: TechnicianState = {
   tasks: [],
@@ -16,6 +22,7 @@ const initialState: TechnicianState = {
   selectedPayment: null,
   bodCheckIn: null,
   hasBODToday: false,
+  todayAttendance: null,
   faults: [],
   currentLocation: null,
   isLoading: false,
@@ -136,14 +143,90 @@ export const fetchPaymentById = createAsyncThunk(
 export const updateTaskStatus = createAsyncThunk(
   'technician/updateTaskStatus',
   async (
-    {id, status, reason}: {id: string; status: string; reason?: string},
+    {
+      id,
+      status,
+      reason,
+      causeOfFault,
+      completionRemarks,
+      completionPhotoUrls,
+      workNotes,
+      rejectionCategory,
+      observedIssueType,
+      linkedMaterialRequestId,
+      signatureDeclineReason,
+    }: {
+      id: string;
+      status: string;
+      reason?: string;
+      causeOfFault?: string;
+      completionRemarks?: string;
+      completionPhotoUrls?: string;
+      workNotes?: string;
+      // SRS 5.3.1.2 — only meaningful when status is REJECTED.
+      rejectionCategory?: 'ISSUE_MISMATCH' | 'MATERIAL_DELAY' | 'OTHER';
+      observedIssueType?: string;
+      linkedMaterialRequestId?: number;
+      // SRS 5.3.1.3 (FR-9) — only meaningful when status is COMPLETED and the client was
+      // unavailable/declined to sign. Routed through this same request rather than a
+      // separate call — /signature is simply never called on this path.
+      signatureDeclineReason?: string;
+    },
     {rejectWithValue},
   ) => {
+    const url = `/api/jobs/${id}/status`;
+    const body = {
+      status,
+      ...(reason ? {reason} : {}),
+      ...(causeOfFault ? {causeOfFault} : {}),
+      ...(completionRemarks ? {completionRemarks} : {}),
+      ...(completionPhotoUrls ? {completionPhotoUrls} : {}),
+      ...(workNotes ? {workNotes} : {}),
+      ...(rejectionCategory ? {rejectionCategory} : {}),
+      ...(observedIssueType ? {observedIssueType} : {}),
+      ...(linkedMaterialRequestId != null ? {linkedMaterialRequestId} : {}),
+      ...(signatureDeclineReason ? {signatureDeclineReason} : {}),
+    };
     try {
-      const response = await api.patch(`/api/jobs/${id}/status`, {
-        status,
-        ...(reason ? {reason} : {}),
-      });
+      const response = await api.patch(url, body);
+      return response.data;
+    } catch (error: any) {
+      // No `error.response` means the request never reached the server
+      // (offline, DNS failure, timeout). Dropping it here is what lost a
+      // technician's job update made without signal — Critical #25 / JOB-016.
+      // Hold it on-device for replay instead. A server that DID respond has
+      // genuinely rejected the update; replaying that would fail identically,
+      // so it still fails loudly.
+      if (!error?.response) {
+        try {
+          await offlineQueue.enqueue({
+            method: 'patch',
+            url,
+            body,
+            label: `Job ${id} → ${status}`,
+          });
+          return rejectWithValue(
+            `${QUEUED_OFFLINE}: No connection. This update is saved on your device and will be sent when you sync.`,
+          );
+        } catch {
+          // Could not even persist it — say so rather than implying it is safe.
+          return rejectWithValue(
+            'No connection, and this update could not be saved on your device. Please retry.',
+          );
+        }
+      }
+      return rejectWithValue(error.response?.data?.message || error.message);
+    }
+  },
+);
+
+// POST /api/jobs/{id}/arrived — technician marks arrival while TRAVELLING
+// (server-side only valid from that status; sets Job.arrivedAt).
+export const markArrived = createAsyncThunk(
+  'technician/markArrived',
+  async (id: string, {rejectWithValue}) => {
+    try {
+      const response = await api.post(`/api/jobs/${id}/arrived`);
       return response.data;
     } catch (error: any) {
       return rejectWithValue(error.response?.data?.message || error.message);
@@ -154,7 +237,11 @@ export const updateTaskStatus = createAsyncThunk(
 export const submitBODCheckIn = createAsyncThunk(
   'technician/bodCheckIn',
   async (
-    data: {latitude: number; longitude: number; address: string},
+    // latitude/longitude are nullable — when GPS is unavailable, callers
+    // must send null, never a fake coordinate like (0,0), which the backend
+    // (AttendanceDTO.CheckInRequest) would otherwise store as an
+    // indistinguishable-from-real phantom location.
+    data: {latitude: number | null; longitude: number | null; address: string},
     {rejectWithValue},
   ) => {
     try {
@@ -172,7 +259,18 @@ export const submitBODCheckIn = createAsyncThunk(
 export const submitEODCheckOut = createAsyncThunk(
   'technician/eodCheckOut',
   async (
-    data: {latitude: number; longitude: number; address: string},
+    // latitude/longitude are nullable for the same reason as submitBODCheckIn:
+    // when GPS is unavailable, callers must send null, never a fake coordinate
+    // like (0,0), which the backend (AttendanceDTO.CheckOutRequest) would
+    // otherwise store as an indistinguishable-from-real phantom location.
+    data: {
+      latitude: number | null;
+      longitude: number | null;
+      address: string;
+      // SRS 5.3.1.4 — one mandatory reason per job still open at checkout;
+      // omitted entirely when there are none.
+      openJobReasons?: {jobId: string; reason: string}[];
+    },
     {rejectWithValue},
   ) => {
     try {
@@ -182,7 +280,22 @@ export const submitEODCheckOut = createAsyncThunk(
       );
       return response.data;
     } catch (error: any) {
-      return rejectWithValue(error.message);
+      return rejectWithValue(error.response?.data?.message || error.message);
+    }
+  },
+);
+
+// Authoritative source for "has this technician already done BOD/EOD today" —
+// scoped to the server's calendar date, unlike a locally-tracked variable
+// which can't tell today's completed session from no session at all.
+export const fetchTodayAttendance = createAsyncThunk(
+  'technician/fetchTodayAttendance',
+  async (_, {rejectWithValue}) => {
+    try {
+      const response = await api.get('/api/attendance/me/today');
+      return response.data as TodayAttendance;
+    } catch (error: any) {
+      return rejectWithValue(error.response?.data?.message || error.message);
     }
   },
 );
@@ -246,20 +359,31 @@ export const submitMaterialRequest = createAsyncThunk(
   'technician/submitMaterialRequest',
   async (
     data: {
-      taskId: string;
+      taskId?: string;
+      faultId?: string;
       materials: {materialId: string; quantity: number}[];
-      notes: string;
+      notes?: string;
+      urgency?: 'NORMAL' | 'URGENT';
     },
     {rejectWithValue},
   ) => {
     try {
-      const response = await api.post(
-        '/api/inventory/material-request',
-        data,
-      );
+      // Backend's MaterialRequestDTO.SubmitRequest field is `items`, not
+      // `materials` — this used to be sent as `materials` directly, which
+      // Jackson silently drops (fail-on-unknown-properties: false), leaving
+      // `items` null and every submission rejected with 400 "At least one
+      // item is required". Remapped here at the API boundary rather than
+      // renaming `materials` everywhere, so callers keep the clearer name.
+      const response = await api.post('/api/inventory/material-request', {
+        items: data.materials,
+        taskId: data.taskId,
+        faultId: data.faultId,
+        notes: data.notes,
+        urgency: data.urgency,
+      });
       return response.data;
     } catch (error: any) {
-      return rejectWithValue(error.message);
+      return rejectWithValue(error.response?.data?.message || error.message);
     }
   },
 );
@@ -294,6 +418,18 @@ const normalizeJob = (job: any): any => ({
   startedAt: job.startedAt,
   rejectionReason: job.rejectionReason,
   rejectedByRole: job.rejectedByRole,
+  // SRS 5.3.1.2 / 5.3.1.4 — categorized-rejection and EOD-handover fields the
+  // Team Lead "Needs Attention" queue reads (Major #6). The backend Job entity
+  // carries these; without copying them here they were silently dropped, so no
+  // screen could ever surface the escalation/handover context.
+  rejectionCategory: job.rejectionCategory,
+  observedIssueType: job.observedIssueType,
+  linkedMaterialRequestId: job.linkedMaterialRequestId,
+  linkedMaterialRequestNumber: job.linkedMaterialRequestNumber,
+  eodHandoverReason: job.eodHandoverReason,
+  eodHandoverAt: job.eodHandoverAt,
+  travelStartedAt: job.travelStartedAt,
+  arrivedAt: job.arrivedAt,
 });
 
 const technicianSlice = createSlice({
@@ -397,6 +533,22 @@ const technicianSlice = createSlice({
       state.isLoading = false;
       state.error = action.payload as string;
     });
+    builder.addCase(markArrived.pending, state => {
+      state.isLoading = true;
+      state.error = null;
+    });
+    builder.addCase(markArrived.fulfilled, (state, action) => {
+      state.isLoading = false;
+      const normalized = normalizeJob(action.payload);
+      const index = state.tasks.findIndex(t => t.id === normalized.id);
+      if (index !== -1) {
+        state.tasks[index] = normalized;
+      }
+    });
+    builder.addCase(markArrived.rejected, (state, action) => {
+      state.isLoading = false;
+      state.error = action.payload as string;
+    });
     builder.addCase(assignTask.pending, state => {
       state.isLoading = true;
       state.error = null;
@@ -453,6 +605,12 @@ const technicianSlice = createSlice({
     });
     builder.addCase(checkTodaysSession.rejected, state => {
       state.hasBODToday = false;
+    });
+    builder.addCase(fetchTodayAttendance.fulfilled, (state, action) => {
+      state.todayAttendance = action.payload;
+    });
+    builder.addCase(fetchTodayAttendance.rejected, state => {
+      state.todayAttendance = null;
     });
     builder.addCase(fetchMyFaults.fulfilled, (state, action) => {
       state.faults = action.payload;

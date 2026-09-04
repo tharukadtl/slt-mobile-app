@@ -130,11 +130,13 @@ const ReportIssueScreen = () => {
           placeholder="Detailed description of the issue"
           placeholderTextColor={colors.textLight}
           value={description}
-          onChangeText={setDescription}
+          onChangeText={text => setDescription(text.slice(0, 500))}
+          maxLength={500}
           multiline
           numberOfLines={4}
           textAlignVertical="top"
         />
+        <Text style={styles.charCount}>{description.length}/500</Text>
 
         {/* Location Picker */}
         <LocationPicker
@@ -146,7 +148,7 @@ const ReportIssueScreen = () => {
         <PhotoPicker
           photos={photos}
           onPhotosChange={setPhotos}
-          maxPhotos={3}
+          maxPhotos={5}
         />
 
         {/* Submit Button */}
@@ -225,6 +227,12 @@ const styles = StyleSheet.create({
   textArea: {
     height: 100,
     paddingTop: spacing.md,
+  },
+  charCount: {
+    fontSize: typography.xs,
+    color: colors.textLight,
+    textAlign: 'right',
+    marginTop: spacing.xs,
   },
   categoryContainer: {
     flexDirection: 'row',

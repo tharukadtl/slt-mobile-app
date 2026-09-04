@@ -94,6 +94,46 @@ export const fetchBillById = createAsyncThunk(
   },
 );
 
+// FR-31: accept a bill, then re-fetch it so selectedBill carries the correct ClientBillDTO
+// shape (the accept POST returns the raw Payment entity, not the DTO the screen renders).
+export const acceptBill = createAsyncThunk(
+  'issues/acceptBill',
+  async (id: string, {rejectWithValue}) => {
+    try {
+      await issueService.acceptBill(id);
+      return await issueService.getBillById(id);
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.error || error.message || 'Failed to accept bill',
+      );
+    }
+  },
+);
+
+// FR-31: report an issue on a bill (category + mandatory description + optional photo), then
+// re-fetch so selectedBill reflects the new DISPUTED status in ClientBillDTO shape.
+export const reportBillDispute = createAsyncThunk(
+  'issues/reportBillDispute',
+  async (
+    {
+      id,
+      category,
+      description,
+      photoUri,
+    }: {id: string; category: string; description: string; photoUri?: string},
+    {rejectWithValue},
+  ) => {
+    try {
+      await issueService.reportBillDispute(id, {category, description, photoUri});
+      return await issueService.getBillById(id);
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.error || error.message || 'Failed to report issue',
+      );
+    }
+  },
+);
+
 export const fetchTechnicianLocation = createAsyncThunk(
   'issues/fetchTechnicianLocation',
   async (issueId: string, {rejectWithValue}) => {
@@ -201,6 +241,38 @@ const issueSlice = createSlice({
       state.selectedBill = action.payload;
     });
     builder.addCase(fetchBillById.rejected, (state, action) => {
+      state.isLoading = false;
+      state.error = action.payload as string;
+    });
+    // acceptBill / reportBillDispute both resolve to the refreshed bill (ClientBillDTO). Reflect
+    // the new status on the selected bill and, if present, its entry in the cached list.
+    const applyUpdatedBill = (state: IssueState, bill: Bill) => {
+      state.isLoading = false;
+      state.selectedBill = bill;
+      const index = state.bills.findIndex(b => b.id === bill.id);
+      if (index !== -1) {
+        state.bills[index] = bill;
+      }
+    };
+    builder.addCase(acceptBill.pending, state => {
+      state.isLoading = true;
+      state.error = null;
+    });
+    builder.addCase(acceptBill.fulfilled, (state, action) => {
+      applyUpdatedBill(state, action.payload);
+    });
+    builder.addCase(acceptBill.rejected, (state, action) => {
+      state.isLoading = false;
+      state.error = action.payload as string;
+    });
+    builder.addCase(reportBillDispute.pending, state => {
+      state.isLoading = true;
+      state.error = null;
+    });
+    builder.addCase(reportBillDispute.fulfilled, (state, action) => {
+      applyUpdatedBill(state, action.payload);
+    });
+    builder.addCase(reportBillDispute.rejected, (state, action) => {
       state.isLoading = false;
       state.error = action.payload as string;
     });

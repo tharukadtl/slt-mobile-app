@@ -25,3 +25,7 @@ dependencyResolutionManagement {
 }
 rootProject.name = 'SLTMobileApp'
 include ':app'
+
+// Detox E2E test runner native module (source-included, per Detox's Android setup)
+include ':detox'
+project(':detox').projectDir = new File(rootProject.projectDir, '../node_modules/detox/android/detox')

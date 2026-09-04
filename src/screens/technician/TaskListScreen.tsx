@@ -172,6 +172,11 @@ const TechnicianTaskListScreen = () => {
           {text: 'Later', style: 'cancel'},
         ],
       );
+    } else {
+      Alert.alert(
+        'Error',
+        (result.payload as string) || 'Failed to accept job. Please try again.',
+      );
     }
   };
 
@@ -187,10 +192,25 @@ const TechnicianTaskListScreen = () => {
       return;
     }
     setShowRejectModal(false);
-    Alert.alert(
-      'Job Rejected',
-      `Task #${selectedTask.id} has been rejected. Reason: ${rejectReason}`,
+    const result = await dispatch(
+      updateTaskStatus({
+        id: selectedTask.id,
+        status: 'REJECTED',
+        reason: rejectReason,
+      }),
     );
+    if (updateTaskStatus.fulfilled.match(result)) {
+      dispatch(fetchTasks());
+      Alert.alert(
+        'Job Rejected',
+        `Task #${selectedTask.id} has been rejected. Reason: ${rejectReason}`,
+      );
+    } else {
+      Alert.alert(
+        'Error',
+        (result.payload as string) || 'Failed to reject job. Please try again.',
+      );
+    }
   };
 
   const handleUpdateStatus = async (task: Task) => {
@@ -233,6 +253,12 @@ const TechnicianTaskListScreen = () => {
                     ],
                   );
                 }
+              } else {
+                Alert.alert(
+                  'Error',
+                  (result.payload as string) ||
+                    'Failed to update status. Please try again.',
+                );
               }
             }
           },

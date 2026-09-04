@@ -25,10 +25,19 @@ const UpdateStatusScreen = () => {
   const [notes, setNotes] = useState('');
 
   const handleUpdate = async () => {
-    await dispatch(updateTaskStatus({taskId, status: 'in_progress'}));
-    Alert.alert('Success', 'Status updated successfully', [
-      {text: 'OK', onPress: () => navigation.goBack()},
-    ]);
+    const result = await dispatch(
+      updateTaskStatus({id: taskId, status: 'in_progress'}),
+    );
+    if (updateTaskStatus.fulfilled.match(result)) {
+      Alert.alert('Success', 'Status updated successfully', [
+        {text: 'OK', onPress: () => navigation.goBack()},
+      ]);
+    } else {
+      Alert.alert(
+        'Error',
+        (result.payload as string) || 'Failed to update status. Please try again.',
+      );
+    }
   };
 
   return (

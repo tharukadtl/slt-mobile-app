@@ -121,7 +121,7 @@ const authSlice = createSlice({
         username: action.payload.username,
         name: action.payload.fullName,
         phone: action.payload.phoneNumber ?? action.payload.username,
-        branchId: action.payload.branchId,
+        opmcId: action.payload.opmcId,
         role: mapRole(action.payload.role),
         language: 'ENGLISH',
         notificationPreferences: {
@@ -169,7 +169,7 @@ const authSlice = createSlice({
         username: action.payload.username,
         name: action.payload.fullName,
         phone: action.payload.phoneNumber ?? action.payload.username,
-        branchId: action.payload.branchId,
+        opmcId: action.payload.opmcId,
         role: mapRole(action.payload.role),
         language: 'ENGLISH',
         notificationPreferences: {
@@ -210,7 +210,7 @@ const authSlice = createSlice({
         username: action.payload.username,
         name: action.payload.fullName,
         phone: action.payload.phoneNumber ?? action.payload.username,
-        branchId: action.payload.branchId,
+        opmcId: action.payload.opmcId,
         role: mapRole(action.payload.role),
         language: 'ENGLISH',
         notificationPreferences: {
@@ -247,7 +247,6 @@ const authSlice = createSlice({
   },
 });
 
-export {register};
 export const {
   restoreSession,
   logout,

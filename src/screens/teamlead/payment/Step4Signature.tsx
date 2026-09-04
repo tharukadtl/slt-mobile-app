@@ -1,4 +1,4 @@
-import React, {useRef} from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -6,8 +6,9 @@ import {
   TextInput,
   TouchableOpacity,
   ScrollView,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
-import SignatureCanvas from 'react-native-signature-canvas';
 import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
@@ -16,8 +17,16 @@ import {formatCurrency} from '@utils/formatters';
 interface Step4SignatureProps {
   customerName: string;
   onCustomerNameChange: (name: string) => void;
-  customerSignature: string;
-  onSignatureChange: (sig: string) => void;
+  // Captured once, by the Technician, at job completion (SRS 5.3.1.3) — the
+  // Team Lead only ever displays it here, never re-collects a new one.
+  // null = still loading from the server; '' = job has no signature on record.
+  technicianSignature: string | null;
+  // SRS 5.3.1.3 (FR-9) — set when the client was unavailable or declined to
+  // sign. Informational only: never blocks submission (see
+  // PaymentSubmissionScreen.handleSubmit) — the Team Lead can see the reason
+  // and still proceed.
+  needsTeamLeadReview: boolean;
+  signatureDeclineReason: string;
   customerAgreed: boolean;
   onAgreedChange: (agreed: boolean) => void;
   materialsFOC: number;
@@ -38,8 +47,9 @@ const AGREEMENT_ITEMS = [
 const Step4Signature: React.FC<Step4SignatureProps> = ({
   customerName,
   onCustomerNameChange,
-  customerSignature,
-  onSignatureChange,
+  technicianSignature,
+  needsTeamLeadReview,
+  signatureDeclineReason,
   customerAgreed,
   onAgreedChange,
   materialsFOC,
@@ -50,7 +60,6 @@ const Step4Signature: React.FC<Step4SignatureProps> = ({
   grandTotal,
   justification,
 }) => {
-  const signatureRef = useRef<any>(null);
   const [agreedItems, setAgreedItems] = React.useState<boolean[]>(
     new Array(AGREEMENT_ITEMS.length).fill(false),
   );
@@ -62,14 +71,7 @@ const Step4Signature: React.FC<Step4SignatureProps> = ({
     onAgreedChange(updated.every(item => item));
   };
 
-  const handleSignature = (sig: string) => {
-    onSignatureChange(sig);
-  };
-
-  const handleClearSignature = () => {
-    signatureRef.current?.clearSignature();
-    onSignatureChange('');
-  };
+  const hasSignature = Boolean(technicianSignature);
 
   return (
     <View style={styles.container}>
@@ -150,46 +152,49 @@ const Step4Signature: React.FC<Step4SignatureProps> = ({
         ))}
       </View>
 
-      {/* Signature Pad */}
+      {/* Customer Signature — received from the Technician's job completion,
+          not re-collected here (SRS 5.3.1.3). */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Customer Signature *</Text>
         <Text style={styles.signatureHint}>
-          Please ask the customer to sign below
+          Captured by the Technician at job completion
         </Text>
-        <View style={styles.signaturePad}>
-          <SignatureCanvas
-            ref={signatureRef}
-            onOK={handleSignature}
-            onEmpty={() => onSignatureChange('')}
-            descriptionText=""
-            clearText="Clear"
-            confirmText="Confirm"
-            webStyle={`
-              .m-signature-pad { box-shadow: none; border: none; }
-              .m-signature-pad--body { border: none; }
-              .m-signature-pad--footer { display: none; }
-              body, html { width: 100%; height: 100%; }
-            `}
-            style={styles.signatureCanvas}
-          />
-        </View>
-        <View style={styles.signatureActions}>
-          <TouchableOpacity
-            style={styles.clearButton}
-            onPress={handleClearSignature}>
-            <Text style={styles.clearButtonText}>Clear</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.saveButton}
-            onPress={() => signatureRef.current?.readSignature()}>
-            <Text style={styles.saveButtonText}>Save Signature</Text>
-          </TouchableOpacity>
-        </View>
-        {customerSignature ? (
-          <Text style={styles.signedText}>✅ Signature captured</Text>
+        {technicianSignature === null ? (
+          <View style={styles.signaturePad}>
+            <ActivityIndicator color={colors.primary} />
+          </View>
+        ) : hasSignature ? (
+          <View style={styles.signaturePad}>
+            <Image
+              source={{uri: technicianSignature as string}}
+              style={styles.signatureImage}
+              resizeMode="contain"
+            />
+          </View>
+        ) : null}
+        {technicianSignature === null ? null : hasSignature ? (
+          <Text style={styles.signedText}>
+            ✅ Signature captured at job completion
+          </Text>
+        ) : needsTeamLeadReview ? (
+          // SRS 5.3.1.3 (FR-9) — client unavailable/declined to sign. The job
+          // still completed; this is a review flag, not a block. The Team
+          // Lead can see the reason and remains free to submit anyway.
+          <View style={styles.reviewBanner}>
+            <Text style={styles.reviewBannerTitle}>
+              🚩 Flagged for Review — No Signature Captured
+            </Text>
+            <Text style={styles.reviewBannerReason}>
+              {signatureDeclineReason ||
+                'The client was unavailable or declined to sign.'}
+            </Text>
+            <Text style={styles.reviewBannerNote}>
+              You may still submit this payment.
+            </Text>
+          </View>
         ) : (
           <Text style={styles.notSignedText}>
-            ⚠️ Signature required
+            ⚠️ No customer signature on record for this job.
           </Text>
         )}
       </View>
@@ -220,12 +225,18 @@ const Step4Signature: React.FC<Step4SignatureProps> = ({
             style={[
               styles.finalValue,
               {
-                color: customerSignature
+                color: hasSignature
                   ? colors.success
+                  : needsTeamLeadReview
+                  ? colors.warning
                   : colors.error,
               },
             ]}>
-            {customerSignature ? 'Yes ✅' : 'No ❌'}
+            {hasSignature
+              ? 'Yes ✅'
+              : needsTeamLeadReview
+              ? 'Flagged 🚩'
+              : 'No ❌'}
           </Text>
         </View>
       </View>
@@ -358,40 +369,12 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderRadius: 8,
     overflow: 'hidden',
-  },
-  signatureCanvas: {
-    flex: 1,
-  },
-  signatureActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: spacing.sm,
-    gap: spacing.sm,
-  },
-  clearButton: {
-    flex: 1,
-    paddingVertical: spacing.sm,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: colors.error,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  clearButtonText: {
-    color: colors.error,
-    fontSize: typography.sm,
-    fontWeight: typography.medium,
-  },
-  saveButton: {
-    flex: 2,
-    paddingVertical: spacing.sm,
-    borderRadius: 6,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-  },
-  saveButtonText: {
-    color: colors.white,
-    fontSize: typography.sm,
-    fontWeight: typography.bold,
+  signatureImage: {
+    flex: 1,
+    width: '100%',
   },
   signedText: {
     textAlign: 'center',
@@ -405,6 +388,31 @@ const styles = StyleSheet.create({
     color: colors.error,
     fontSize: typography.sm,
     marginTop: spacing.sm,
+  },
+  reviewBanner: {
+    backgroundColor: colors.statusPending,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    borderRadius: 8,
+    padding: spacing.md,
+    marginTop: spacing.sm,
+  },
+  reviewBannerTitle: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.warning,
+    marginBottom: spacing.xs,
+  },
+  reviewBannerReason: {
+    fontSize: typography.sm,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+    lineHeight: typography.lineHeightMd,
+  },
+  reviewBannerNote: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    fontStyle: 'italic',
   },
   finalSummaryCard: {
     backgroundColor: colors.primary,

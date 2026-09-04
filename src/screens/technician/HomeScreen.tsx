@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
   View,
   Text,
@@ -23,16 +23,51 @@ import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {
   fetchTasks,
+  fetchTodayAttendance,
   submitBODCheckIn,
   submitEODCheckOut,
   setHasBODToday,
   updateTaskStatus,
+  QUEUED_OFFLINE,
 } from '@store/slices/technicianSlice';
 import Geolocation from '@react-native-community/geolocation';
-import {Task} from '@appTypes/technician.types';
+import {Task, MaterialRequestSummary} from '@appTypes/technician.types';
+import technicianService from '@services/technicianService';
+import offlineQueue from '@services/offlineQueue';
+import {subscribeToConnectivity} from '@services/connectivityService';
 
 type TechnicianHomeNavigationProp =
   StackNavigationProp<TechnicianStackParamList>;
+
+// SRS 5.3.1.2 — On-Site Issue Escalation and Material-Delay Rejection are two
+// distinct paths, not one generic reject. 'OTHER' covers every other reject
+// reason (e.g. customer unavailable, duplicate job) that isn't either of those.
+type RejectionCategory = 'ISSUE_MISMATCH' | 'MATERIAL_DELAY' | 'OTHER';
+type ObservedIssueType = 'INTERNET' | 'PHONE' | 'FIBER' | 'TV' | 'OTHER';
+
+const REJECTION_CATEGORIES: {value: RejectionCategory; icon: string; label: string}[] = [
+  {value: 'ISSUE_MISMATCH', icon: '🔀', label: 'Issue Mismatch'},
+  {value: 'MATERIAL_DELAY', icon: '📦', label: 'Material Delay'},
+  {value: 'OTHER', icon: '❓', label: 'Other'},
+];
+
+// Mirrors the backend's Fault.FaultCategory enum (fieldops) — the closed
+// vocabulary an Admin/Team Lead already assigns a fault from, reused here so
+// "observed issue type" is directly comparable to what was assigned.
+const OBSERVED_ISSUE_TYPES: {value: ObservedIssueType; icon: string; label: string}[] = [
+  {value: 'INTERNET', icon: '🌐', label: 'Internet'},
+  {value: 'PHONE', icon: '📞', label: 'Phone'},
+  {value: 'FIBER', icon: '🔌', label: 'Fiber'},
+  {value: 'TV', icon: '📺', label: 'TV'},
+  {value: 'OTHER', icon: '🔧', label: 'Other'},
+];
+
+// SRS 5.3.1.4 — EOD Pending-Task Handover. Matches the backend's
+// AttendanceService.OPEN_JOB_STATUSES exactly (same 4 statuses the old
+// bulk-return query used) — a job in any other status is either already
+// closed out (completed/cancelled) or already rejected, neither of which
+// needs an EOD handover reason.
+const OPEN_TASK_STATUSES = ['pending', 'accepted', 'in_progress', 'hold'];
 
 const getPriorityColor = (priority?: string) => {
   switch (priority) {
@@ -81,17 +116,29 @@ const TechnicianHomeScreen = () => {
   const navigation = useNavigation<TechnicianHomeNavigationProp>();
   const dispatch = useAppDispatch();
   const {user} = useAppSelector(state => state.auth);
-  const {tasks, bodCheckIn, isLoading, error: tasksError} = useAppSelector(
-    state => state.technician,
-  );
+  const {tasks, bodCheckIn, todayAttendance, isLoading, error: tasksError} =
+    useAppSelector(state => state.technician);
 
   const [isCheckingIn, setIsCheckingIn] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [checkInTime, setCheckInTime] = useState<string | null>(
     bodCheckIn?.checkInTime || null,
   );
-  const [isOnline, setIsOnline] = useState(true);
+
+  // Calendar-date-scoped BOD/EOD status, sourced from the backend (not a
+  // local flag) — this is what can't be bypassed by an EOD resetting local
+  // state, since the server only reports CHECKED_IN/CHECKED_OUT for today.
+  const todayStatus = todayAttendance?.currentStatus ?? 'NOT_CHECKED_IN';
+  const hasCheckedInToday = todayStatus !== 'NOT_CHECKED_IN';
+  const hasCheckedOutToday = todayStatus === 'CHECKED_OUT';
+  // Real connectivity (Critical #25): `null` means no connectivity source has
+  // reported yet — deliberately not the same as "online", so nothing here
+  // assumes a connection it hasn't observed.
+  const [isOnline, setIsOnline] = useState<boolean | null>(null);
+  // Real count of mutations held on-device, driven by the offline queue itself
+  // rather than a counter the UI is free to reset.
   const [pendingSyncs, setPendingSyncs] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [currentTime, setCurrentTime] = useState(
     new Date().toLocaleTimeString(),
   );
@@ -101,14 +148,53 @@ const TechnicianHomeScreen = () => {
     targetStatus: string;
     label: string;
     reason: string;
-  }>({visible: false, taskId: '', targetStatus: '', label: '', reason: ''});
+    // SRS 5.3.1.2 — only used/shown when targetStatus is 'REJECTED'.
+    category: RejectionCategory | null;
+    observedIssueType: ObservedIssueType | null;
+    linkedMaterialRequestId: number | null;
+  }>({
+    visible: false,
+    taskId: '',
+    targetStatus: '',
+    label: '',
+    reason: '',
+    category: null,
+    observedIssueType: null,
+    linkedMaterialRequestId: null,
+  });
+  const [outstandingRequests, setOutstandingRequests] = useState<MaterialRequestSummary[]>([]);
+  const [loadingOutstandingRequests, setLoadingOutstandingRequests] = useState(false);
 
-  // Re-fetch jobs every time this screen comes into focus (e.g. after team lead assigns)
+  // SRS 5.3.1.4 — EOD Pending-Task Handover modal state: one reason per
+  // still-open job, keyed by task id.
+  const [eodHandoverModal, setEodHandoverModal] = useState<{
+    visible: boolean;
+    reasons: Record<string, string>;
+  }>({visible: false, reasons: {}});
+  // Duration is computed once in handleEODCheckOut and reused by
+  // performCheckOut whichever path (native Alert or handover modal) confirms.
+  const pendingCheckOutDuration = useRef<{hours: number; minutes: number}>({
+    hours: 0,
+    minutes: 0,
+  });
+
+  // Re-fetch jobs and today's BOD/EOD status every time this screen comes into
+  // focus (e.g. after team lead assigns, or after the device clock rolls to a
+  // new calendar day) so the gate below always reflects the server's truth.
   useFocusEffect(
     useCallback(() => {
       dispatch(fetchTasks());
+      dispatch(fetchTodayAttendance());
     }, [dispatch]),
   );
+
+  useEffect(() => {
+    if (todayStatus === 'CHECKED_IN' && todayAttendance?.checkInTime) {
+      setCheckInTime(todayAttendance.checkInTime);
+    } else if (todayStatus !== 'CHECKED_IN') {
+      setCheckInTime(null);
+    }
+  }, [todayStatus, todayAttendance?.checkInTime]);
 
   useEffect(() => {
     // Update clock every second
@@ -116,14 +202,16 @@ const TechnicianHomeScreen = () => {
       setCurrentTime(new Date().toLocaleTimeString());
     }, 1000);
 
-    // Check network status
-    const checkNetwork = setInterval(() => {
-      setIsOnline(Math.random() > 0.1); // Simulate network check
-    }, 30000);
+    // Real connectivity, from NetInfo — replaces a `Math.random()` simulation
+    // that meant the app could never actually tell it was offline.
+    const unsubscribeConnectivity = subscribeToConnectivity(setIsOnline);
+    // Real pending-sync count, from the persisted offline queue.
+    const unsubscribeQueue = offlineQueue.subscribe(setPendingSyncs);
 
     return () => {
       clearInterval(clockInterval);
-      clearInterval(checkNetwork);
+      unsubscribeConnectivity();
+      unsubscribeQueue();
     };
   }, []);
 
@@ -156,6 +244,10 @@ const TechnicianHomeScreen = () => {
 
   const allJobsCompleted =
     totalJobs > 0 && completedJobs === totalJobs;
+
+  // SRS 5.3.1.4 — jobs still open at EOD, each needing its own mandatory
+  // handover reason (not one blanket reason for all of them).
+  const openTasks = tasks.filter(t => OPEN_TASK_STATUSES.includes(t.status));
 
   const requestLocationPermission = async (): Promise<boolean> => {
     const granted = await PermissionsAndroid.request(
@@ -190,10 +282,19 @@ const TechnicianHomeScreen = () => {
   };
 
   const handleBODCheckIn = async () => {
-    if (checkInTime) {
+    if (hasCheckedOutToday) {
+      Alert.alert(
+        'Day Already Completed',
+        'You have already completed BOD and EOD for today. Check back tomorrow.',
+      );
+      return;
+    }
+    if (hasCheckedInToday) {
       Alert.alert(
         'Already Checked In',
-        `You checked in at ${new Date(checkInTime).toLocaleTimeString()}`,
+        checkInTime
+          ? `You checked in at ${new Date(checkInTime).toLocaleTimeString()}`
+          : 'You have already checked in today.',
       );
       return;
     }
@@ -221,11 +322,25 @@ const TechnicianHomeScreen = () => {
             {
               text: 'Check In ✅',
               onPress: async () => {
-                await dispatch(submitBODCheckIn({latitude, longitude, address}));
+                try {
+                  await dispatch(
+                    submitBODCheckIn({latitude, longitude, address}),
+                  ).unwrap();
+                } catch (err: any) {
+                  // Don't claim success on a rejected check-in — mirrors the
+                  // performCheckOut guard below (Critical #16/#19).
+                  setIsCheckingIn(false);
+                  Alert.alert(
+                    'Check-In Failed',
+                    typeof err === 'string' ? err : 'Please try again.',
+                  );
+                  return;
+                }
                 dispatch(setHasBODToday(true));
                 setCheckInTime(new Date().toISOString());
                 setIsCheckingIn(false);
                 dispatch(fetchTasks());
+                dispatch(fetchTodayAttendance());
                 Alert.alert(
                   '✅ Checked In Successfully',
                   `Time: ${new Date().toLocaleTimeString()}\nHave a great day!`,
@@ -246,9 +361,36 @@ const TechnicianHomeScreen = () => {
             {text: 'Cancel', style: 'cancel'},
             {
               text: 'Check In Anyway',
-              onPress: () => {
-                const now = new Date().toISOString();
-                setCheckInTime(now);
+              onPress: async () => {
+                // This path must hit the backend like the GPS-success branch
+                // above — alerting "Checked In" without dispatching would
+                // leave the technician not checked in server-side.
+                setIsCheckingIn(true);
+                try {
+                  await dispatch(
+                    submitBODCheckIn({
+                      // null, not (0,0) — a fake coordinate would be
+                      // indistinguishable from a real check-in at 0°N 0°E.
+                      // AttendanceDTO.CheckInRequest accepts null for exactly
+                      // this case (same rule as BODScreen's fallback).
+                      latitude: null,
+                      longitude: null,
+                      address: 'Location unavailable',
+                    }),
+                  ).unwrap();
+                } catch (err: any) {
+                  setIsCheckingIn(false);
+                  Alert.alert(
+                    'Check-In Failed',
+                    typeof err === 'string' ? err : 'Please try again.',
+                  );
+                  return;
+                }
+                dispatch(setHasBODToday(true));
+                setCheckInTime(new Date().toISOString());
+                setIsCheckingIn(false);
+                dispatch(fetchTasks());
+                dispatch(fetchTodayAttendance());
                 Alert.alert(
                   '✅ Checked In',
                   'Location unavailable — checked in without GPS',
@@ -262,7 +404,75 @@ const TechnicianHomeScreen = () => {
     );
   };
 
+  // Fetches location, dispatches the actual checkout, and shows the result —
+  // shared by both the "no open jobs" native-Alert path and the "open jobs,
+  // reasons collected" modal path below.
+  const performCheckOut = (
+    hours: number,
+    minutes: number,
+    openJobReasons?: {jobId: string; reason: string}[],
+  ) => {
+    setIsCheckingOut(true);
+    Geolocation.getCurrentPosition(
+      async position => {
+        const {latitude, longitude} = position.coords;
+        const address = await getAddressFromCoords(latitude, longitude);
+        try {
+          await dispatch(
+            submitEODCheckOut({latitude, longitude, address, openJobReasons}),
+          ).unwrap();
+        } catch (err: any) {
+          // Don't claim success on a rejected checkout (e.g. the backend's
+          // own mandatory-reason check failing a race) — that would be
+          // exactly the "fake success on a real failure" pattern flagged as
+          // Critical #16 elsewhere in this app.
+          setIsCheckingOut(false);
+          Alert.alert('Check-Out Failed', typeof err === 'string' ? err : 'Please try again.');
+          return;
+        }
+        setCheckInTime(null);
+        setIsCheckingOut(false);
+        dispatch(fetchTodayAttendance());
+        Alert.alert(
+          '✅ Checked Out',
+          `Total: ${hours}h ${minutes}m\nCompleted: ${completedJobs} jobs\nGood work today!`,
+        );
+      },
+      async error => {
+        // This path must hit the backend like the GPS-success branch above —
+        // alerting "Checked Out" without dispatching left the technician still
+        // checked in server-side while being told otherwise (Critical #29).
+        try {
+          await dispatch(
+            submitEODCheckOut({
+              // null, not (0,0) — a fake coordinate would be indistinguishable
+              // from a real check-out at 0°N 0°E. AttendanceDTO.CheckOutRequest
+              // accepts null for exactly this case (same rule as check-in).
+              latitude: null,
+              longitude: null,
+              address: 'Location unavailable',
+              openJobReasons,
+            }),
+          ).unwrap();
+        } catch (err: any) {
+          setIsCheckingOut(false);
+          Alert.alert('Check-Out Failed', typeof err === 'string' ? err : 'Please try again.');
+          return;
+        }
+        setCheckInTime(null);
+        setIsCheckingOut(false);
+        dispatch(fetchTodayAttendance());
+        Alert.alert('✅ Checked Out', `Total: ${hours}h ${minutes}m`);
+      },
+      {enableHighAccuracy: true, timeout: 10000},
+    );
+  };
+
   const handleEODCheckOut = async () => {
+    if (hasCheckedOutToday) {
+      Alert.alert('Error', 'You have already checked out today.');
+      return;
+    }
     if (!checkInTime) {
       Alert.alert('Error', 'You have not checked in today');
       return;
@@ -274,6 +484,19 @@ const TechnicianHomeScreen = () => {
     const hours = Math.floor(diffMs / 3600000);
     const minutes = Math.floor((diffMs % 3600000) / 60000);
 
+    // SRS 5.3.1.4 — jobs still open need a mandatory per-job reason before
+    // check-out can proceed, collected via a dedicated modal rather than the
+    // plain native confirm below (which can't hold multiple text inputs).
+    if (openTasks.length > 0) {
+      setEodHandoverModal({
+        visible: true,
+        reasons: Object.fromEntries(openTasks.map(t => [t.id, ''])),
+      });
+      // Stash the duration for performCheckOut once the modal is confirmed.
+      pendingCheckOutDuration.current = {hours, minutes};
+      return;
+    }
+
     Alert.alert(
       'EOD Check-Out',
       `Working time: ${hours}h ${minutes}m\nCompleted: ${completedJobs}/${totalJobs} jobs\n\nConfirm check-out?`,
@@ -282,57 +505,152 @@ const TechnicianHomeScreen = () => {
         {
           text: 'Check Out 🌆',
           style: 'destructive',
-          onPress: async () => {
-            setIsCheckingOut(true);
-            Geolocation.getCurrentPosition(
-              async position => {
-                const {latitude, longitude} = position.coords;
-                const address = await getAddressFromCoords(
-                  latitude,
-                  longitude,
-                );
-                await dispatch(
-                  submitEODCheckOut({latitude, longitude, address}),
-                );
-                setCheckInTime(null);
-                setIsCheckingOut(false);
-                Alert.alert(
-                  '✅ Checked Out',
-                  `Total: ${hours}h ${minutes}m\nCompleted: ${completedJobs} jobs\nGood work today!`,
-                );
-              },
-              error => {
-                setIsCheckingOut(false);
-                setCheckInTime(null);
-                Alert.alert(
-                  '✅ Checked Out',
-                  `Total: ${hours}h ${minutes}m`,
-                );
-              },
-              {enableHighAccuracy: true, timeout: 10000},
-            );
-          },
+          onPress: () => performCheckOut(hours, minutes),
         },
       ],
     );
   };
 
-  const handleSync = () => {
-    setPendingSyncs(0);
-    Alert.alert('Synced', 'All data synced successfully');
+  const submitEodHandoverAndCheckOut = () => {
+    const missing = openTasks.filter(t => !eodHandoverModal.reasons[t.id]?.trim());
+    if (missing.length > 0) {
+      Alert.alert(
+        'Reason Required',
+        `Please explain why each open job wasn't completed. Missing: ${missing
+          .map(t => t.jobNumber || `#${t.id}`)
+          .join(', ')}`,
+      );
+      return;
+    }
+    const openJobReasons = openTasks.map(t => ({
+      jobId: t.id,
+      reason: eodHandoverModal.reasons[t.id].trim(),
+    }));
+    setEodHandoverModal({visible: false, reasons: {}});
+    const {hours, minutes} = pendingCheckOutDuration.current;
+    performCheckOut(hours, minutes, openJobReasons);
+  };
+
+  // Critical #25 — this used to set pendingSyncs to 0 and alert "All data
+  // synced successfully" without sending anything. Every branch below now
+  // reports what actually happened, and the success branch is only reachable
+  // after the queue has genuinely been drained by the server.
+  const handleSync = async () => {
+    if (isSyncing) {
+      return;
+    }
+    const pending = await offlineQueue.getPending();
+    setPendingSyncs(pending.length);
+
+    if (pending.length === 0) {
+      Alert.alert(
+        'Nothing to Sync',
+        'There are no pending changes saved on this device.',
+      );
+      return;
+    }
+    if (isOnline === false) {
+      Alert.alert(
+        'Cannot Sync While Offline',
+        `${pending.length} pending change(s) are saved on this device and will be sent once you are back online.`,
+      );
+      return;
+    }
+
+    setIsSyncing(true);
+    const result = await offlineQueue.triggerSync();
+    setIsSyncing(false);
+    setPendingSyncs(result.remaining);
+
+    if (result.synced > 0) {
+      // Pull the server's own view back in, so the screen reflects what was
+      // actually accepted rather than the local optimistic guess.
+      dispatch(fetchTasks());
+    }
+
+    if (result.synced > 0 && result.failed === 0 && result.remaining === 0) {
+      Alert.alert(
+        'Synced',
+        `${result.synced} pending change(s) synced successfully`,
+      );
+      return;
+    }
+
+    Alert.alert(
+      'Sync Incomplete',
+      [
+        `${result.synced} of ${result.attempted} change(s) synced.`,
+        result.remaining > 0
+          ? `${result.remaining} still pending on this device.`
+          : null,
+        ...result.errors,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    );
+  };
+
+  // A status update that couldn't reach the server is now held in the offline
+  // queue rather than dropped (Critical #25). Say which of the two happened —
+  // "saved, will send" is a materially different outcome from "failed".
+  const reportUpdateFailure = (err: any) => {
+    const message = typeof err === 'string' ? err : 'Please try again.';
+    const prefix = `${QUEUED_OFFLINE}:`;
+    if (QUEUED_OFFLINE && message.startsWith(prefix)) {
+      Alert.alert('Saved On This Device', message.slice(prefix.length).trim());
+      return;
+    }
+    Alert.alert('Error', message);
   };
 
   const handleQuickAction = (taskId: string, status: string) => {
     dispatch(updateTaskStatus({id: taskId, status}))
       .unwrap()
-      .catch(err => Alert.alert('Error', err));
+      .catch(reportUpdateFailure);
   };
 
   const openReasonModal = (taskId: string, targetStatus: string, label: string) => {
-    setReasonModal({visible: true, taskId, targetStatus, label, reason: ''});
+    setReasonModal({
+      visible: true,
+      taskId,
+      targetStatus,
+      label,
+      reason: '',
+      category: null,
+      observedIssueType: null,
+      linkedMaterialRequestId: null,
+    });
+    setOutstandingRequests([]);
+  };
+
+  // Only REJECTED goes through the SRS 5.3.1.2 categorization step — HOLD
+  // keeps its existing single-field flow unchanged.
+  const isRejectFlow = reasonModal.targetStatus === 'REJECTED';
+
+  const selectRejectionCategory = async (category: RejectionCategory) => {
+    setReasonModal(m => ({...m, category, observedIssueType: null, linkedMaterialRequestId: null}));
+    if (category === 'MATERIAL_DELAY') {
+      setLoadingOutstandingRequests(true);
+      try {
+        const all = await technicianService.getMyOutstandingMaterialRequests();
+        setOutstandingRequests(all.filter(r => r.taskId === reasonModal.taskId));
+      } catch {
+        setOutstandingRequests([]);
+      } finally {
+        setLoadingOutstandingRequests(false);
+      }
+    }
   };
 
   const submitWithReason = () => {
+    if (isRejectFlow && !reasonModal.category) {
+      Alert.alert('Category Required', 'Please select why this job is being rejected.');
+      return;
+    }
+    if (isRejectFlow && reasonModal.category === 'ISSUE_MISMATCH' && !reasonModal.observedIssueType) {
+      Alert.alert('Issue Type Required', 'Please select the issue type you actually observed on-site.');
+      return;
+    }
     if (!reasonModal.reason.trim()) {
       Alert.alert('Reason Required', 'Please enter a reason to continue.');
       return;
@@ -341,9 +659,18 @@ const TechnicianHomeScreen = () => {
       id: reasonModal.taskId,
       status: reasonModal.targetStatus,
       reason: reasonModal.reason.trim(),
+      ...(isRejectFlow && reasonModal.category
+        ? {rejectionCategory: reasonModal.category}
+        : {}),
+      ...(isRejectFlow && reasonModal.observedIssueType
+        ? {observedIssueType: reasonModal.observedIssueType}
+        : {}),
+      ...(isRejectFlow && reasonModal.linkedMaterialRequestId != null
+        ? {linkedMaterialRequestId: reasonModal.linkedMaterialRequestId}
+        : {}),
     }))
       .unwrap()
-      .catch(err => Alert.alert('Error', err));
+      .catch(reportUpdateFailure);
     setReasonModal(m => ({...m, visible: false}));
   };
 
@@ -395,7 +722,12 @@ const TechnicianHomeScreen = () => {
         <View style={styles.jobActions}>
           <TouchableOpacity
             style={styles.completeButton}
-            onPress={() => handleQuickAction(task.id, 'COMPLETED')}>
+            onPress={() =>
+              // Completing a job requires after-photos + a real signature
+              // (FR-9) — that flow lives in TaskDetailScreen, not here, so
+              // route there instead of completing directly from this card.
+              navigation.navigate('TaskDetail', {taskId: task.id})
+            }>
             <Text style={styles.completeButtonText}>✅ Complete</Text>
           </TouchableOpacity>
           <TouchableOpacity
@@ -418,7 +750,12 @@ const TechnicianHomeScreen = () => {
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.completeButton}
-            onPress={() => handleQuickAction(task.id, 'COMPLETED')}>
+            onPress={() =>
+              // Completing a job requires after-photos + a real signature
+              // (FR-9) — that flow lives in TaskDetailScreen, not here, so
+              // route there instead of completing directly from this card.
+              navigation.navigate('TaskDetail', {taskId: task.id})
+            }>
             <Text style={styles.completeButtonText}>✅ Complete</Text>
           </TouchableOpacity>
           {rejectBtn}
@@ -541,15 +878,15 @@ const TechnicianHomeScreen = () => {
   return (
     <View style={styles.container}>
       {/* Offline Banner */}
-      {!isOnline && (
+      {isOnline === false && (
         <TouchableOpacity
           style={styles.offlineBanner}
           onPress={handleSync}>
           <Text style={styles.offlineBannerText}>
             📵 Offline Mode
             {pendingSyncs > 0
-              ? ` — ${pendingSyncs} pending syncs`
-              : ' — Tap to sync when online'}
+              ? ` — ${pendingSyncs} change(s) saved on this device`
+              : ' — changes will be saved until you reconnect'}
           </Text>
         </TouchableOpacity>
       )}
@@ -584,20 +921,41 @@ const TechnicianHomeScreen = () => {
                 style={[
                   styles.onlineStatus,
                   {
-                    backgroundColor: isOnline
-                      ? colors.success
-                      : colors.error,
+                    // Three real states — "unknown" is not painted green, so
+                    // the pill can no longer claim a connection the app has
+                    // not actually observed (Critical #25).
+                    backgroundColor:
+                      isOnline === true
+                        ? colors.success
+                        : isOnline === false
+                        ? colors.error
+                        : colors.textSecondary,
                   },
                 ]}>
                 <Text style={styles.onlineStatusText}>
-                  {isOnline ? '🟢 Online' : '🔴 Offline'}
+                  {isOnline === true
+                    ? '🟢 Online'
+                    : isOnline === false
+                    ? '🔴 Offline'
+                    : '⚪ Checking…'}
                 </Text>
               </View>
             </View>
           </View>
 
           {/* BOD/EOD Check-in */}
-          {!checkInTime ? (
+          {hasCheckedOutToday ? (
+            <View style={styles.checkedInCard}>
+              <View style={styles.checkedInInfo}>
+                <Text style={styles.checkedInText}>
+                  ✅ Day Completed
+                </Text>
+                <Text style={styles.checkedInTime}>
+                  BOD/EOD already done for today
+                </Text>
+              </View>
+            </View>
+          ) : !checkInTime ? (
             <TouchableOpacity
               style={styles.bodButton}
               onPress={handleBODCheckIn}
@@ -730,9 +1088,12 @@ const TechnicianHomeScreen = () => {
         {pendingSyncs > 0 && (
           <TouchableOpacity
             style={styles.syncBanner}
-            onPress={handleSync}>
+            onPress={handleSync}
+            disabled={isSyncing}>
             <Text style={styles.syncBannerText}>
-              🔄 {pendingSyncs} items pending sync — Tap to sync
+              {isSyncing
+                ? `🔄 Syncing ${pendingSyncs} pending change(s)…`
+                : `🔄 ${pendingSyncs} change(s) pending sync — Tap to sync`}
             </Text>
           </TouchableOpacity>
         )}
@@ -743,10 +1104,16 @@ const TechnicianHomeScreen = () => {
             <Text style={styles.jobsSectionTitle}>
               Today's Jobs ({sortedTasks.length})
             </Text>
-            <TouchableOpacity
-              onPress={() => dispatch(fetchTasks())}>
-              <Text style={styles.refreshText}>🔄 Refresh</Text>
-            </TouchableOpacity>
+            <View style={styles.jobsSectionHeaderActions}>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('JobsMap')}>
+                <Text style={styles.refreshText}>🗺️ Map View</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => dispatch(fetchTasks())}>
+                <Text style={styles.refreshText}>🔄 Refresh</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {isLoading ? (
@@ -815,20 +1182,130 @@ const TechnicianHomeScreen = () => {
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>{reasonModal.label}</Text>
             <Text style={styles.modalSubtitle}>
-              {reasonModal.targetStatus === 'REJECTED'
+              {isRejectFlow
                 ? 'This job will be returned to your team lead with your reason.'
                 : 'Job will be paused. You can resume it at any time.'}
             </Text>
-            <TextInput
-              style={styles.reasonInput}
-              placeholder="Enter reason..."
-              placeholderTextColor={colors.textLight}
-              multiline
-              numberOfLines={4}
-              value={reasonModal.reason}
-              onChangeText={t => setReasonModal(m => ({...m, reason: t}))}
-              autoFocus
-            />
+
+            <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+              {isRejectFlow && (
+                <>
+                  {/* Step 1 — SRS 5.3.1.2: categorize why, not just a free-text reject */}
+                  <Text style={styles.modalSectionLabel}>Why is this being rejected?</Text>
+                  <View style={styles.categoryRow}>
+                    {REJECTION_CATEGORIES.map(c => (
+                      <TouchableOpacity
+                        key={c.value}
+                        style={[
+                          styles.categoryChip,
+                          reasonModal.category === c.value && styles.categoryChipSelected,
+                        ]}
+                        onPress={() => selectRejectionCategory(c.value)}>
+                        <Text style={styles.categoryChipIcon}>{c.icon}</Text>
+                        <Text
+                          style={[
+                            styles.categoryChipText,
+                            reasonModal.category === c.value && styles.categoryChipTextSelected,
+                          ]}>
+                          {c.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {/* Step 2a — Issue Mismatch: which issue type was actually observed */}
+                  {reasonModal.category === 'ISSUE_MISMATCH' && (
+                    <>
+                      <Text style={styles.modalSectionLabel}>Observed issue type</Text>
+                      <View style={styles.categoryRow}>
+                        {OBSERVED_ISSUE_TYPES.map(t => (
+                          <TouchableOpacity
+                            key={t.value}
+                            style={[
+                              styles.categoryChip,
+                              reasonModal.observedIssueType === t.value && styles.categoryChipSelected,
+                            ]}
+                            onPress={() =>
+                              setReasonModal(m => ({...m, observedIssueType: t.value}))
+                            }>
+                            <Text style={styles.categoryChipIcon}>{t.icon}</Text>
+                            <Text
+                              style={[
+                                styles.categoryChipText,
+                                reasonModal.observedIssueType === t.value &&
+                                  styles.categoryChipTextSelected,
+                              ]}>
+                              {t.label}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </>
+                  )}
+
+                  {/* Step 2b — Material Delay: link an outstanding request if one exists */}
+                  {reasonModal.category === 'MATERIAL_DELAY' && (
+                    <>
+                      <Text style={styles.modalSectionLabel}>Linked material request</Text>
+                      {loadingOutstandingRequests ? (
+                        <ActivityIndicator color={colors.primary} style={{marginVertical: spacing.sm}} />
+                      ) : outstandingRequests.length === 0 ? (
+                        <Text style={styles.noRequestsText}>
+                          No outstanding material request found under your account for this job.
+                          If your team lead submitted one on your behalf, describe it in the notes
+                          below — you can still reject without a linked reference.
+                        </Text>
+                      ) : (
+                        outstandingRequests.map(r => (
+                          <TouchableOpacity
+                            key={r.id}
+                            style={[
+                              styles.requestRow,
+                              reasonModal.linkedMaterialRequestId === r.id && styles.requestRowSelected,
+                            ]}
+                            onPress={() =>
+                              setReasonModal(m => ({...m, linkedMaterialRequestId: r.id}))
+                            }>
+                            <View
+                              style={[
+                                styles.radio,
+                                reasonModal.linkedMaterialRequestId === r.id && styles.radioSelected,
+                              ]}>
+                              {reasonModal.linkedMaterialRequestId === r.id && (
+                                <View style={styles.radioDot} />
+                              )}
+                            </View>
+                            <View style={{flex: 1}}>
+                              <Text style={styles.requestNumber}>{r.requestNumber}</Text>
+                              <Text style={styles.requestMeta}>
+                                {r.status} · {r.totalItems} item{r.totalItems === 1 ? '' : 's'}
+                                {r.submittedTimeAgo ? ` · ${r.submittedTimeAgo}` : ''}
+                              </Text>
+                            </View>
+                          </TouchableOpacity>
+                        ))
+                      )}
+                    </>
+                  )}
+
+                  {reasonModal.category && (
+                    <Text style={styles.modalSectionLabel}>Details</Text>
+                  )}
+                </>
+              )}
+
+              <TextInput
+                style={styles.reasonInput}
+                placeholder="Enter reason..."
+                placeholderTextColor={colors.textLight}
+                multiline
+                numberOfLines={4}
+                value={reasonModal.reason}
+                onChangeText={t => setReasonModal(m => ({...m, reason: t}))}
+                autoFocus={!isRejectFlow}
+              />
+            </ScrollView>
+
             <View style={styles.modalButtons}>
               <TouchableOpacity
                 style={styles.modalCancelButton}
@@ -844,6 +1321,62 @@ const TechnicianHomeScreen = () => {
                 <Text style={styles.modalConfirmText}>
                   {reasonModal.targetStatus === 'REJECTED' ? '❌ Confirm Reject' : '⏸ Confirm Hold'}
                 </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* EOD Pending-Task Handover Modal (SRS 5.3.1.4) — one mandatory reason
+          per job still open at checkout, not one blanket reason for all. */}
+      <Modal
+        visible={eodHandoverModal.visible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setEodHandoverModal({visible: false, reasons: {}})}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Before You Check Out</Text>
+            <Text style={styles.modalSubtitle}>
+              {openTasks.length} job{openTasks.length === 1 ? '' : 's'} still open — explain why
+              each wasn't completed. These move to your team lead's pending tasks.
+            </Text>
+            <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+              {openTasks.map(t => (
+                <View key={t.id} style={styles.handoverJobBlock}>
+                  <Text style={styles.modalSectionLabel}>
+                    {t.jobNumber || `Job #${t.id}`}
+                    {t.customerName ? ` — ${t.customerName}` : ''}
+                  </Text>
+                  <TextInput
+                    style={styles.reasonInput}
+                    placeholder="Why wasn't this completed?"
+                    placeholderTextColor={colors.textLight}
+                    multiline
+                    numberOfLines={3}
+                    value={eodHandoverModal.reasons[t.id] || ''}
+                    onChangeText={text =>
+                      setEodHandoverModal(m => ({
+                        ...m,
+                        reasons: {...m.reasons, [t.id]: text},
+                      }))
+                    }
+                  />
+                </View>
+              ))}
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => setEodHandoverModal({visible: false, reasons: {}})}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalConfirmButton, {backgroundColor: colors.warning}]}
+                onPress={submitEodHandoverAndCheckOut}>
+                <Text style={styles.modalConfirmText}>🌆 Confirm Check-Out</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1077,6 +1610,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: spacing.md,
   },
+  jobsSectionHeaderActions: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
   jobsSectionTitle: {
     fontSize: typography.lg,
     fontWeight: typography.bold,
@@ -1299,6 +1836,102 @@ const styles = StyleSheet.create({
     fontSize: typography.sm,
     color: colors.textSecondary,
     marginBottom: spacing.md,
+  },
+  modalScroll: {
+    maxHeight: 420,
+  },
+  modalSectionLabel: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  handoverJobBlock: {
+    marginBottom: spacing.md,
+  },
+  categoryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  categoryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  categoryChipSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '15',
+  },
+  categoryChipIcon: {
+    fontSize: 16,
+  },
+  categoryChipText: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    fontWeight: typography.medium,
+  },
+  categoryChipTextSelected: {
+    color: colors.primary,
+    fontWeight: typography.bold,
+  },
+  noRequestsText: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
+    marginBottom: spacing.md,
+  },
+  requestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+    marginBottom: spacing.xs,
+  },
+  requestRowSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  radioSelected: {
+    borderColor: colors.primary,
+  },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.primary,
+  },
+  requestNumber: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+  },
+  requestMeta: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
   reasonInput: {
     borderWidth: 1,

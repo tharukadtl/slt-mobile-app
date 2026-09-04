@@ -6,6 +6,8 @@ import {
   ScrollView,
   TouchableOpacity,
   RefreshControl,
+  Modal,
+  Alert,
 } from 'react-native';
 import MapView, {Marker, PROVIDER_GOOGLE} from 'react-native-maps';
 import {useNavigation} from '@react-navigation/native';
@@ -21,11 +23,60 @@ import {
   fetchTeamStats,
   fetchMyFaults,
   checkTodaysSession,
+  assignTask,
 } from '@store/slices/technicianSlice';
+import api from '@services/api';
 type TeamLeadHomeNavigationProp =
   StackNavigationProp<TeamLeadStackParamList>;
 
-const TABS = ['My Jobs', 'Team Jobs', 'Team Map'];
+const TABS = ['My Jobs', 'Team Jobs', 'Needs Attention', 'Team Map'];
+
+// Mirrors the technician-side OBSERVED_ISSUE_TYPES vocabulary (technician/
+// HomeScreen.tsx) so a mismatch the technician logged reads identically here.
+const OBSERVED_ISSUE_LABELS: Record<string, string> = {
+  INTERNET: '🌐 Internet',
+  PHONE: '📞 Phone',
+  FIBER: '🔌 Fiber',
+  TV: '📺 TV',
+  OTHER: '🔧 Other',
+};
+
+// SRS 5.3.1.2 (on-site escalation) + 5.3.1.4 (EOD batch handover) — two
+// different urgency models, so the queue sub-groups rather than showing one
+// flat list. Rejection categories mirror the technician REJECTION_CATEGORIES.
+const ATTENTION_SECTIONS: {
+  key: string;
+  title: string;
+  icon: string;
+  match: (t: any) => boolean;
+}[] = [
+  {
+    key: 'ISSUE_MISMATCH',
+    title: 'Issue Mismatch',
+    icon: '🔀',
+    match: t =>
+      t.status === 'rejected' && t.rejectionCategory === 'ISSUE_MISMATCH',
+  },
+  {
+    key: 'MATERIAL_DELAY',
+    title: 'Material Delay',
+    icon: '📦',
+    match: t =>
+      t.status === 'rejected' && t.rejectionCategory === 'MATERIAL_DELAY',
+  },
+  {
+    key: 'OTHER',
+    title: 'Other',
+    icon: '❓',
+    match: t => t.status === 'rejected' && t.rejectionCategory === 'OTHER',
+  },
+  {
+    key: 'EOD_HANDOVER',
+    title: 'EOD Handover',
+    icon: '🌙',
+    match: t => t.eodHandoverReason != null,
+  },
+];
 
 const getPriorityColor = (priority?: string) => {
   switch (priority) {
@@ -64,11 +115,67 @@ const TeamLeadHomeScreen = () => {
   } = useAppSelector(state => state.technician);
 
   const [activeTab, setActiveTab] = useState(0);
+  // Material-delay rejections carry a linkedMaterialRequestId; the request's
+  // own detail (number/status/items) lives in the inventory service. There is
+  // no by-id endpoint, so we pull the request history and index by id.
+  const [materialReqs, setMaterialReqs] = useState<Record<number, any>>({});
+  // Reassign picker — opens over whichever card's Reassign button was tapped,
+  // in either the Team Jobs or Needs Attention tab.
+  const [showReassignModal, setShowReassignModal] = useState(false);
+  const [reassignTask, setReassignTask] = useState<any>(null);
   const mapRef = useRef<MapView>(null);
 
   useEffect(() => {
     loadData();
   }, []);
+
+  // Fetch linked material-request details for any Material-Delay rejection once
+  // the Needs Attention tab is opened (only then are they on screen).
+  useEffect(() => {
+    if (activeTab !== 2) {
+      return;
+    }
+    const delayJobs = tasks.filter(
+      t =>
+        t.status === 'rejected' &&
+        t.rejectionCategory === 'MATERIAL_DELAY' &&
+        t.linkedMaterialRequestId != null,
+    );
+    if (delayJobs.length === 0) {
+      return;
+    }
+    const neededIds = new Set(
+      delayJobs.map(t => t.linkedMaterialRequestId),
+    );
+    let cancelled = false;
+    (async () => {
+      try {
+        // A technician-rejected job has its technicianId cleared server-side
+        // (returned to the team-lead pool), so the request can't be scoped by
+        // requester here — fetch the request history and pick out the linked
+        // ones by id.
+        const res = await api.get(
+          '/api/inventory/material-requests/history',
+        );
+        const requests = res.data?.requests ?? [];
+        const map: Record<number, any> = {};
+        for (const r of requests) {
+          if (neededIds.has(r.id)) {
+            map[r.id] = r;
+          }
+        }
+        if (!cancelled) {
+          setMaterialReqs(prev => ({...prev, ...map}));
+        }
+      } catch {
+        // Non-fatal: the card falls back to the request number the job
+        // itself carries (linkedMaterialRequestNumber).
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, tasks]);
 
   const loadData = () => {
     dispatch(checkTodaysSession());
@@ -92,6 +199,55 @@ const TeamLeadHomeScreen = () => {
 
   const handleBODPress = () => {
     navigation.navigate('BOD');
+  };
+
+  const handleReassignPress = (task: any) => {
+    setReassignTask(task);
+    setShowReassignModal(true);
+  };
+
+  // Reassign the selected job to another technician via
+  // POST /api/jobs/{id}/reassign (assignTask thunk). The backend requires the
+  // new technician to be in this team's active session today, which is exactly
+  // what teamMembers holds — so the picker lists those. On success the job's
+  // status resets to PENDING, so a full refresh drops it out of the Needs
+  // Attention queue and moves it in Team Jobs.
+  const handleReassignConfirm = (member: any) => {
+    const target = reassignTask;
+    if (!target) {
+      return;
+    }
+    const techName = member.fullName || member.name || member.username || 'technician';
+    Alert.alert(
+      'Reassign Job',
+      `Reassign Task #${target.id} to ${techName}?`,
+      [
+        {text: 'Cancel', style: 'cancel'},
+        {
+          text: 'Reassign',
+          onPress: async () => {
+            setShowReassignModal(false);
+            try {
+              await dispatch(
+                assignTask({
+                  id: String(target.id),
+                  technicianId: String(member.id),
+                }),
+              ).unwrap();
+              loadData();
+              Alert.alert('Success', `Task #${target.id} reassigned to ${techName}`);
+            } catch (error: any) {
+              Alert.alert(
+                'Error',
+                error || 'Failed to reassign task. Please try again.',
+              );
+            } finally {
+              setReassignTask(null);
+            }
+          },
+        },
+      ],
+    );
   };
 
   const renderTaskCard = (task: any) => (
@@ -190,7 +346,7 @@ const TeamLeadHomeScreen = () => {
         <View style={styles.taskActions}>
           <TouchableOpacity
             style={styles.reassignButton}
-            onPress={() => navigation.navigate('AssignJobs')}>
+            onPress={() => handleReassignPress(task)}>
             <Text style={styles.reassignButtonText}>
               🔄 Reassign
             </Text>
@@ -217,6 +373,144 @@ const TeamLeadHomeScreen = () => {
       )}
     </TouchableOpacity>
   );
+
+  const renderAttentionCard = (task: any, sectionKey: string) => {
+    const linkedReq =
+      task.linkedMaterialRequestId != null
+        ? materialReqs[task.linkedMaterialRequestId]
+        : null;
+    const reqNumber = linkedReq?.requestNumber || task.linkedMaterialRequestNumber;
+    return (
+      <View key={task.id} style={styles.taskCard}>
+        <View style={styles.taskHeader}>
+          <View style={styles.taskHeaderLeft}>
+            <View style={styles.techAvatar}>
+              <Text style={styles.techAvatarText}>
+                {task.technicianName?.charAt(0) || 'T'}
+              </Text>
+            </View>
+            <View>
+              <Text style={styles.taskId}>Task #{task.id}</Text>
+              <Text style={styles.techName}>
+                {task.technicianName || 'Unassigned'}
+              </Text>
+            </View>
+          </View>
+          <View
+            style={[
+              styles.statusBadge,
+              {backgroundColor: getStatusColor(task.status) + '20'},
+            ]}>
+            <Text
+              style={[
+                styles.statusText,
+                {color: getStatusColor(task.status)},
+              ]}>
+              {task.status.replace('_', ' ').toUpperCase()}
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.taskDetails}>
+          {task.customerName && (
+            <Text style={styles.taskDetail}>👤 {task.customerName}</Text>
+          )}
+          <Text style={styles.taskDetail} numberOfLines={1}>
+            📍 {task.location?.address}
+          </Text>
+        </View>
+
+        {/* Free-text reason (technician's note), when present */}
+        {task.rejectionReason && (
+          <View style={styles.rejectionBanner}>
+            <Text style={styles.rejectionBannerText}>❌ {task.rejectionReason}</Text>
+          </View>
+        )}
+
+        {/* Category-specific context */}
+        {sectionKey === 'ISSUE_MISMATCH' && task.observedIssueType && (
+          <View style={styles.contextBox}>
+            <Text style={styles.contextLabel}>Observed issue type</Text>
+            <Text style={styles.contextValue}>
+              {OBSERVED_ISSUE_LABELS[task.observedIssueType] ||
+                task.observedIssueType}
+            </Text>
+          </View>
+        )}
+
+        {sectionKey === 'MATERIAL_DELAY' && (
+          <View style={styles.contextBox}>
+            <Text style={styles.contextLabel}>Linked material request</Text>
+            {reqNumber ? (
+              <Text style={styles.contextValue}>
+                {reqNumber}
+                {linkedReq
+                  ? ` · ${linkedReq.status} · ${linkedReq.totalItems} item${
+                      linkedReq.totalItems === 1 ? '' : 's'
+                    }`
+                  : ''}
+                {linkedReq?.submittedTimeAgo
+                  ? ` · ${linkedReq.submittedTimeAgo}`
+                  : ''}
+              </Text>
+            ) : (
+              <Text style={styles.contextValue}>No linked request</Text>
+            )}
+          </View>
+        )}
+
+        {sectionKey === 'EOD_HANDOVER' && (
+          <View style={styles.contextBox}>
+            <Text style={styles.contextLabel}>EOD handover reason</Text>
+            <Text style={styles.contextValue}>{task.eodHandoverReason}</Text>
+            {task.eodHandoverAt && (
+              <Text style={styles.contextMeta}>
+                Handed over {new Date(task.eodHandoverAt).toLocaleString()}
+              </Text>
+            )}
+          </View>
+        )}
+
+        <View style={styles.taskActions}>
+          <TouchableOpacity
+            style={styles.reassignButton}
+            onPress={() => handleReassignPress(task)}>
+            <Text style={styles.reassignButtonText}>🔄 Reassign</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
+  const renderNeedsAttention = () => {
+    const attentionTasks = tasks.filter(
+      t =>
+        (t.status === 'rejected' && t.rejectionCategory) ||
+        t.eodHandoverReason != null,
+    );
+    if (attentionTasks.length === 0) {
+      return (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyIcon}>✅</Text>
+          <Text style={styles.emptyText}>No jobs need attention</Text>
+        </View>
+      );
+    }
+    return ATTENTION_SECTIONS.map(section => {
+      const items = attentionTasks.filter(section.match);
+      if (items.length === 0) {
+        return null;
+      }
+      return (
+        <View key={section.key} style={styles.attentionSection}>
+          <Text style={styles.attentionSectionTitle}>
+            {section.icon} {section.title} ({items.length})
+          </Text>
+          {items.map(t => renderAttentionCard(t, section.key))}
+        </View>
+      );
+    });
+  };
 
   const renderTeamMap = () => (
     <View style={styles.mapContainer}>
@@ -323,6 +617,8 @@ const TeamLeadHomeScreen = () => {
           </View>
         );
       case 2:
+        return renderNeedsAttention();
+      case 3:
         return renderTeamMap();
       default:
         return null;
@@ -355,6 +651,11 @@ const TeamLeadHomeScreen = () => {
                 style={styles.assignButton}
                 onPress={() => navigation.navigate('AssignJobs')}>
                 <Text style={styles.bodButtonText}>📋 Assign</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.requestsButton}
+                onPress={() => navigation.navigate('TeamMaterialRequests')}>
+                <Text style={styles.bodButtonText}>📦 Requests</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.eodButton}
@@ -520,6 +821,69 @@ const TeamLeadHomeScreen = () => {
           {renderTabContent()}
         </View>
       </ScrollView>
+
+      {/* Reassign Modal — pick a technician from this team's active session */}
+      <Modal
+        visible={showReassignModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowReassignModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                Reassign Task #{reassignTask?.id}
+              </Text>
+              <TouchableOpacity onPress={() => setShowReassignModal(false)}>
+                <Text style={styles.modalClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.reassignSubtitle}>
+              Select a technician from today's active session to reassign this
+              job:
+            </Text>
+            <ScrollView style={styles.modalContent}>
+              {teamMembers.length === 0 ? (
+                <Text style={styles.emptyText}>
+                  No technicians in today's session.
+                </Text>
+              ) : (
+                teamMembers.map(member => {
+                  const mName =
+                    member.fullName ||
+                    member.name ||
+                    member.username ||
+                    'Technician';
+                  const isCurrent =
+                    String(member.id) === String(reassignTask?.technicianId);
+                  return (
+                    <TouchableOpacity
+                      key={member.id}
+                      style={[
+                        styles.memberOption,
+                        isCurrent && styles.memberOptionCurrent,
+                      ]}
+                      onPress={() => handleReassignConfirm(member)}>
+                      <View style={styles.memberOptionAvatar}>
+                        <Text style={styles.memberOptionAvatarText}>
+                          {mName.charAt(0).toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={styles.memberOptionInfo}>
+                        <Text style={styles.memberOptionName}>{mName}</Text>
+                        <Text style={styles.memberOptionJobs}>
+                          {member.completedToday}/{member.totalJobs} jobs today
+                          {isCurrent ? ' · current' : ''}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -571,6 +935,12 @@ const styles = StyleSheet.create({
   },
   assignButton: {
     backgroundColor: colors.success,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 8,
+  },
+  requestsButton: {
+    backgroundColor: colors.secondary,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
     borderRadius: 8,
@@ -827,6 +1197,36 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.error + '40',
   },
+  attentionSection: {
+    marginBottom: spacing.md,
+  },
+  attentionSectionTitle: {
+    fontSize: typography.md,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+  },
+  contextBox: {
+    backgroundColor: colors.background,
+    borderRadius: 6,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  contextLabel: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginBottom: 2,
+  },
+  contextValue: {
+    fontSize: typography.sm,
+    color: colors.textPrimary,
+    fontWeight: typography.medium,
+  },
+  contextMeta: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
   rejectionBannerText: {
     color: colors.error,
     fontSize: typography.xs,
@@ -975,6 +1375,84 @@ const styles = StyleSheet.create({
     fontSize: typography.lg,
     color: colors.textSecondary,
     textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContainer: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '75%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  modalTitle: {
+    fontSize: typography.xl,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+  },
+  modalClose: {
+    fontSize: typography.lg,
+    color: colors.textSecondary,
+    padding: spacing.xs,
+  },
+  modalContent: {
+    padding: spacing.lg,
+  },
+  reassignSubtitle: {
+    fontSize: typography.md,
+    color: colors.textSecondary,
+    padding: spacing.lg,
+    paddingBottom: 0,
+  },
+  memberOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.md,
+    borderRadius: 8,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.background,
+  },
+  memberOptionCurrent: {
+    backgroundColor: colors.primary + '10',
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  memberOptionAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.md,
+  },
+  memberOptionAvatarText: {
+    color: colors.white,
+    fontSize: typography.lg,
+    fontWeight: typography.bold,
+  },
+  memberOptionInfo: {
+    flex: 1,
+  },
+  memberOptionName: {
+    fontSize: typography.md,
+    fontWeight: typography.medium,
+    color: colors.textPrimary,
+  },
+  memberOptionJobs: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginTop: 2,
   },
 });
 

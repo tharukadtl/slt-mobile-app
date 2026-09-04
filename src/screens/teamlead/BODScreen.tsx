@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   View,
   Text,
@@ -17,10 +17,11 @@ import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
-import {performBOD} from '@store/slices/technicianSlice';
+import {performBOD, submitMaterialRequest} from '@store/slices/technicianSlice';
 import Geolocation from '@react-native-community/geolocation';
 import MapView, {Marker, UrlTile} from 'react-native-maps';
 import api from '@services/api';
+import technicianService from '@services/technicianService';
 
 type BODNavigationProp = StackNavigationProp<TeamLeadStackParamList>;
 
@@ -40,6 +41,73 @@ interface Vehicle {
   model?: string;
   status?: string;
 }
+
+// FR-33 Stage 3b — GET /api/resource-plans/lookup. One row per shift that has
+// a confirmed Predictive Resource Plan for this Team Lead's own OPMC today.
+// Starting-point suggestions only (SRS 5.6.8) — nothing here is locked or
+// auto-submitted; the Team Lead can adjust every field below regardless.
+interface SuggestedMaterial {
+  materialId: number | null;
+  materialName: string;
+  suggestedQuantity: number | null;
+  unit?: string | null;
+}
+
+interface SuggestedPlanRow {
+  shift: string;
+  zoneName?: string;
+  predictedFaultCount?: number;
+  suggestedTechnicians: number | null;
+  suggestedVehicles: number | null;
+  materials: SuggestedMaterial[];
+}
+
+const SHIFT_LABEL: Record<string, string> = {
+  MORNING: 'Morning',
+  AFTERNOON: 'Afternoon',
+  EVENING: 'Evening',
+};
+
+// SRS 5.4.0 — Material Allocation. Design decision (investigated, not
+// assumed): TEAM_LEAD has zero direct stock-mutation capability anywhere in
+// the backend (every /stock/adjust, /material-requests/{id}/approve|deliver
+// endpoint is ADMIN-only) — the only real mechanism a Team Lead has for
+// getting materials is submitting a MaterialRequest for Admin approval,
+// already proven end-to-end via teamlead/MaterialRequestScreen.tsx. So "BOD
+// material allocation" reuses that exact mechanism (submitMaterialRequest)
+// rather than inventing a new "allocation" entity that would bypass the
+// same stock governance every other material flow goes through — it's
+// submitted as one request, tagged to this BOD session via the existing
+// `taskId` field (no new backend field needed), right after BOD succeeds.
+// Mirrors backend's StockDTO.StockLevelDTO (InventoryController's
+// GET /api/inventory/materials/search) — used for the live stock browser.
+interface MaterialSearchResult {
+  materialId: number;
+  materialName: string;
+  sku?: string;
+  unit?: string;
+  currentStock: number;
+  minThreshold?: number;
+  stockStatus?: string;
+}
+
+interface AllocatedMaterial {
+  materialId: number;
+  name: string;
+  quantity: number;
+  unit?: string;
+  currentStock: number;
+  stockStatus?: string;
+}
+
+const getStockStatusColor = (status?: string) => {
+  switch (status) {
+    case 'IN_STOCK': return colors.success;
+    case 'LOW_STOCK': return colors.warning;
+    case 'OUT_OF_STOCK': return colors.error;
+    default: return colors.textSecondary;
+  }
+};
 
 const BODScreen = () => {
   const navigation = useNavigation<BODNavigationProp>();
@@ -63,19 +131,52 @@ const BODScreen = () => {
   } | null>(null);
   const [gettingLocation, setGettingLocation] = useState(true);
 
+  const [suggestedPlan, setSuggestedPlan] = useState<SuggestedPlanRow[]>([]);
+  const [loadingSuggestedPlan, setLoadingSuggestedPlan] = useState(false);
+  // Pre-check technicians from the suggestion exactly once — never re-apply
+  // on a later re-render/refetch, so it can't stomp on a manual adjustment.
+  const appliedSuggestionRef = useRef(false);
+
+  // Material Allocation (SRS 5.4.0) — searchable live-stock browser + a
+  // running allocation list, submitted as one MaterialRequest right after
+  // BOD succeeds.
+  const [materialSearchText, setMaterialSearchText] = useState('');
+  const [materialSearchResults, setMaterialSearchResults] = useState<MaterialSearchResult[]>([]);
+  const [loadingMaterialSearch, setLoadingMaterialSearch] = useState(false);
+  const [allocatedMaterials, setAllocatedMaterials] = useState<AllocatedMaterial[]>([]);
+
   useEffect(() => {
     fetchTechnicians();
     fetchVehicles();
+    fetchSuggestedPlan();
     getLocation();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.branchId]);
+  }, [user?.opmcId]);
+
+  useEffect(() => {
+    if (appliedSuggestionRef.current) return;
+    if (technicians.length === 0 || suggestedPlan.length === 0) return;
+
+    const maxSuggestedTechnicians = Math.max(
+      0,
+      ...suggestedPlan.map(p => p.suggestedTechnicians ?? 0),
+    );
+    if (maxSuggestedTechnicians > 0) {
+      const startingIds = technicians
+        .filter(t => t.isActive !== false)
+        .slice(0, maxSuggestedTechnicians)
+        .map(t => t.id);
+      setSelectedIds(startingIds);
+    }
+    appliedSuggestionRef.current = true;
+  }, [technicians, suggestedPlan]);
 
   const fetchTechnicians = async () => {
     setLoadingTechs(true);
     try {
-      const branchId = user?.branchId;
-      const url = branchId
-        ? `/api/users?role=TECHNICIAN&branchId=${branchId}&activeOnly=true`
+      const opmcId = user?.opmcId;
+      const url = opmcId
+        ? `/api/users?role=TECHNICIAN&opmcId=${opmcId}&activeOnly=true`
         : '/api/users?role=TECHNICIAN';
       const response = await api.get(url);
       setTechnicians(response.data);
@@ -89,9 +190,9 @@ const BODScreen = () => {
   const fetchVehicles = async () => {
     setLoadingVehicles(true);
     try {
-      const branchId = user?.branchId;
-      const url = branchId
-        ? `/api/vehicles?branchId=${branchId}&activeOnly=true`
+      const opmcId = user?.opmcId;
+      const url = opmcId
+        ? `/api/vehicles?opmcId=${opmcId}&activeOnly=true`
         : '/api/vehicles';
       const response = await api.get(url);
       setVehicles(response.data);
@@ -99,6 +200,116 @@ const BODScreen = () => {
       // non-fatal — vehicle selection remains optional
     } finally {
       setLoadingVehicles(false);
+    }
+  };
+
+  const fetchSuggestedPlan = async () => {
+    setLoadingSuggestedPlan(true);
+    try {
+      // No `date` param — the backend defaults to today's date server-side,
+      // avoiding any client/server timezone mismatch on "today".
+      const response = await api.get('/api/resource-plans/lookup');
+      setSuggestedPlan(response.data || []);
+    } catch {
+      // Non-fatal — no confirmed plan for today (or admin hasn't set one up
+      // yet) just means BOD starts blank, same as before Stage 3b.
+      setSuggestedPlan([]);
+    } finally {
+      setLoadingSuggestedPlan(false);
+    }
+  };
+
+  // Debounced live-stock search — same pattern already used by
+  // technician/ResourceManagementScreen.tsx for its inventory browser.
+  useEffect(() => {
+    if (!materialSearchText.trim()) {
+      setMaterialSearchResults([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingMaterialSearch(true);
+    const timer = setTimeout(async () => {
+      try {
+        const results = await technicianService.searchMaterials(materialSearchText);
+        if (!cancelled) setMaterialSearchResults(Array.isArray(results) ? results : []);
+      } catch {
+        if (!cancelled) setMaterialSearchResults([]);
+      } finally {
+        if (!cancelled) setLoadingMaterialSearch(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [materialSearchText]);
+
+  const addMaterial = (item: MaterialSearchResult, quantity: number = 1) => {
+    setAllocatedMaterials(prev => {
+      const existing = prev.find(m => m.materialId === item.materialId);
+      if (existing) {
+        return prev.map(m =>
+          m.materialId === item.materialId ? {...m, quantity: m.quantity + quantity} : m,
+        );
+      }
+      return [
+        ...prev,
+        {
+          materialId: item.materialId,
+          name: item.materialName,
+          quantity,
+          unit: item.unit,
+          currentStock: item.currentStock,
+          stockStatus: item.stockStatus,
+        },
+      ];
+    });
+    setMaterialSearchText('');
+    setMaterialSearchResults([]);
+  };
+
+  const removeMaterial = (materialId: number) => {
+    setAllocatedMaterials(prev => prev.filter(m => m.materialId !== materialId));
+  };
+
+  const updateMaterialQuantity = (materialId: number, quantity: number) => {
+    if (quantity <= 0) {
+      removeMaterial(materialId);
+      return;
+    }
+    setAllocatedMaterials(prev =>
+      prev.map(m => (m.materialId === materialId ? {...m, quantity} : m)),
+    );
+  };
+
+  // One-shot pull from the FR-33 suggested plan (informed by it, not blocked
+  // on it) — resolves each suggestion's materialName against a live stock
+  // search, since the suggestion itself carries no stock/unit context beyond
+  // materialId/name/unit. Skips suggestions with no materialId (can't order
+  // stock for a suggestion that isn't tied to a real Material row).
+  const addSuggestedMaterials = async () => {
+    const suggested = suggestedPlan
+      .flatMap(p => p.materials)
+      .filter(m => m.materialId != null);
+    for (const m of suggested) {
+      try {
+        const results = await technicianService.searchMaterials(m.materialName);
+        const match = results.find((r: any) => r.materialId === m.materialId);
+        if (match) {
+          addMaterial(
+            {
+              materialId: match.materialId,
+              materialName: match.materialName,
+              unit: match.unit,
+              currentStock: match.currentStock,
+              stockStatus: match.stockStatus,
+            },
+            Math.max(1, Math.round(m.suggestedQuantity ?? 1)),
+          );
+        }
+      } catch {
+        // Non-fatal — skip this suggestion, Team Lead can still add it manually.
+      }
     }
   };
 
@@ -207,14 +418,46 @@ const BODScreen = () => {
     }
 
     const result = await dispatch(performBOD(payload));
-    if (performBOD.fulfilled.match(result)) {
-      navigation.replace('AssignJobs');
-    } else {
+    if (!performBOD.fulfilled.match(result)) {
       Alert.alert(
         'Error',
         (result.payload as string) || 'BOD submission failed',
       );
+      return;
     }
+
+    // Material allocation is a real request to Admin (SRS 5.4.0 — Team Lead
+    // has no direct stock authority, see the design-decision comment on
+    // AllocatedMaterial above), submitted as its own MaterialRequest tagged
+    // to this BOD session via the existing taskId field — not a new backend
+    // concept. Best-effort: BOD (the time-critical part — dispatching the
+    // team) already succeeded, so a failed material submission is surfaced
+    // honestly rather than either silently dropped or blocking navigation.
+    if (allocatedMaterials.length > 0) {
+      const sessionId = (result.payload as {id: number}).id;
+      const matResult = await dispatch(
+        submitMaterialRequest({
+          taskId: `BOD-${sessionId}`,
+          materials: allocatedMaterials.map(m => ({
+            materialId: String(m.materialId),
+            quantity: m.quantity,
+          })),
+          notes: `BOD material allocation for today's session.`,
+        }),
+      );
+      if (!submitMaterialRequest.fulfilled.match(matResult)) {
+        Alert.alert(
+          'BOD Started, Material Request Failed',
+          `Your day has started, but the material allocation could not be submitted: ${
+            (matResult.payload as string) || 'unknown error'
+          }. You can submit it separately from Material Requests.`,
+          [{text: 'OK', onPress: () => navigation.replace('AssignJobs')}],
+        );
+        return;
+      }
+    }
+
+    navigation.replace('AssignJobs');
   };
 
   return (
@@ -288,6 +531,44 @@ const BODScreen = () => {
           )}
         </View>
 
+        {/* Suggested Resource Plan (Stage 3b) — starting point only, nothing
+            here is locked; Technicians below are pre-checked from this, but
+            Vehicle/Material stay informational since BOD only supports a
+            single vehicle and has no material-quantity field of its own. */}
+        {!loadingSuggestedPlan && suggestedPlan.length > 0 && (
+          <View style={[styles.card, styles.suggestionCard]}>
+            <Text style={styles.sectionTitle}>📊 Suggested for Today</Text>
+            <Text style={styles.suggestionSubtitle}>
+              From Resource Planning — a starting point you can adjust below.
+            </Text>
+            {suggestedPlan.map((row, i) => (
+              <View key={`${row.shift}-${i}`} style={styles.suggestionRow}>
+                <Text style={styles.suggestionShift}>
+                  {SHIFT_LABEL[row.shift] || row.shift}
+                  {row.zoneName ? ` · ${row.zoneName}` : ''}
+                </Text>
+                <Text style={styles.suggestionDetail}>
+                  👥 {row.suggestedTechnicians ?? '—'} technicians · 🚗{' '}
+                  {row.suggestedVehicles ?? '—'} vehicles
+                </Text>
+                {row.materials.length > 0 && (
+                  <Text style={styles.suggestionMaterials}>
+                    📦{' '}
+                    {row.materials
+                      .map(
+                        m =>
+                          `${m.materialName}: ${m.suggestedQuantity ?? '—'}${
+                            m.unit ? ` ${m.unit}` : ''
+                          }`,
+                      )
+                      .join(' · ')}
+                  </Text>
+                )}
+              </View>
+            ))}
+          </View>
+        )}
+
         {/* Vehicle Selection (Optional) */}
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>🚗 Vehicle (Optional)</Text>
@@ -353,6 +634,93 @@ const BODScreen = () => {
               onChangeText={setOdometerStart}
               keyboardType="numeric"
             />
+          )}
+        </View>
+
+        {/* Material Allocation (SRS 5.4.0) — submitted as a MaterialRequest
+            right after BOD succeeds, see the design-decision comment above. */}
+        <View style={styles.card}>
+          <View style={styles.materialHeaderRow}>
+            <Text style={styles.sectionTitle}>📦 Material Allocation (Optional)</Text>
+            {suggestedPlan.some(p => p.materials.length > 0) && (
+              <TouchableOpacity onPress={addSuggestedMaterials}>
+                <Text style={styles.addSuggestedText}>+ Add Suggested</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <TextInput
+            style={styles.input}
+            placeholder="Search materials to allocate..."
+            placeholderTextColor={colors.textLight}
+            value={materialSearchText}
+            onChangeText={setMaterialSearchText}
+          />
+
+          {loadingMaterialSearch ? (
+            <ActivityIndicator size="small" color={colors.primary} style={{marginTop: spacing.sm}} />
+          ) : (
+            materialSearchResults.length > 0 && (
+              <View style={styles.searchResults}>
+                {materialSearchResults.map(item => (
+                  <TouchableOpacity
+                    key={item.materialId}
+                    style={styles.searchResultRow}
+                    onPress={() => addMaterial(item)}>
+                    <View style={{flex: 1}}>
+                      <Text style={styles.vehicleLabel}>{item.materialName}</Text>
+                      <Text
+                        style={[
+                          styles.stockText,
+                          {color: getStockStatusColor(item.stockStatus)},
+                        ]}>
+                        {item.currentStock} {item.unit || ''} in stock
+                        {item.stockStatus ? ` · ${item.stockStatus.replace('_', ' ')}` : ''}
+                      </Text>
+                    </View>
+                    <Text style={styles.addText}>+ Add</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )
+          )}
+
+          {allocatedMaterials.length === 0 ? (
+            <Text style={styles.emptyText}>No materials allocated yet.</Text>
+          ) : (
+            allocatedMaterials.map(m => {
+              const overStock = m.quantity > m.currentStock;
+              return (
+                <View key={m.materialId} style={styles.allocatedRow}>
+                  <View style={{flex: 1}}>
+                    <Text style={styles.vehicleLabel}>{m.name}</Text>
+                    <Text
+                      style={[
+                        styles.stockText,
+                        {color: overStock ? colors.error : getStockStatusColor(m.stockStatus)},
+                      ]}>
+                      {overStock
+                        ? `⚠️ Only ${m.currentStock} ${m.unit || ''} in stock`
+                        : `${m.currentStock} ${m.unit || ''} in stock`}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => updateMaterialQuantity(m.materialId, m.quantity - 1)}
+                    style={styles.qtyButton}>
+                    <Text style={styles.qtyButtonText}>−</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.qtyValue}>{m.quantity}</Text>
+                  <TouchableOpacity
+                    onPress={() => updateMaterialQuantity(m.materialId, m.quantity + 1)}
+                    style={styles.qtyButton}>
+                    <Text style={styles.qtyButtonText}>+</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => removeMaterial(m.materialId)}>
+                    <Text style={styles.removeText}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })
           )}
         </View>
 
@@ -477,6 +845,35 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     marginBottom: spacing.md,
   },
+  suggestionCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.secondary,
+    backgroundColor: colors.secondary + '08',
+  },
+  suggestionSubtitle: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginTop: -spacing.sm,
+    marginBottom: spacing.md,
+  },
+  suggestionRow: {
+    marginBottom: spacing.sm,
+  },
+  suggestionShift: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+  },
+  suggestionDetail: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  suggestionMaterials: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -530,6 +927,78 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     textAlign: 'center',
     paddingVertical: spacing.md,
+  },
+  materialHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  addSuggestedText: {
+    fontSize: typography.sm,
+    color: colors.primary,
+    fontWeight: typography.medium,
+  },
+  searchResults: {
+    marginTop: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  searchResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.background,
+  },
+  stockText: {
+    fontSize: typography.xs,
+    marginTop: 2,
+  },
+  addText: {
+    color: colors.primary,
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+  },
+  allocatedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 8,
+    marginTop: spacing.xs,
+    backgroundColor: colors.background,
+    gap: spacing.sm,
+  },
+  qtyButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  qtyButtonText: {
+    fontSize: typography.md,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+  },
+  qtyValue: {
+    fontSize: typography.md,
+    fontWeight: typography.medium,
+    color: colors.textPrimary,
+    minWidth: 20,
+    textAlign: 'center',
+  },
+  removeText: {
+    color: colors.error,
+    fontSize: typography.md,
+    fontWeight: typography.bold,
+    paddingHorizontal: spacing.xs,
   },
   vehicleRow: {
     flexDirection: 'row',

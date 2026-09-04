@@ -8,7 +8,15 @@
  * DISPLAYS the technicianSignature prop:
  *   - null  -> loading spinner (ActivityIndicator)
  *   - value -> <Image> of the signature (uri = the signature)
- *   - ''    -> blocking "no customer signature found" message
+ *   - ''    -> "no signature on record" message (no longer a block — see below)
+ *
+ * #12 (FR-9 client-declined-signature) — a missing signature no longer claims
+ * to be blocking ("must capture a signature before payment can be submitted"
+ * is gone): when needsTeamLeadReview is true, a review banner shows the real
+ * decline reason instead, and explicitly states the Team Lead may still
+ * submit. This is informational only — PaymentSubmissionScreen.handleSubmit
+ * itself no longer gates on signature presence at all (covered separately in
+ * PaymentSubmissionScreen.reviewFlag.test.tsx).
  *
  * Rendered with react-test-renderer (RTL is not installed in this project).
  * This is a pure presentational component (no navigation/redux), so it renders
@@ -23,6 +31,8 @@ import Step4Signature from '@screens/teamlead/payment/Step4Signature';
 const baseProps = {
   customerName: 'Jane',
   onCustomerNameChange: () => {},
+  needsTeamLeadReview: false,
+  signatureDeclineReason: '',
   customerAgreed: false,
   onAgreedChange: () => {},
   materialsFOC: 0,
@@ -34,11 +44,18 @@ const baseProps = {
   justification: '',
 };
 
-const renderWith = (technicianSignature: string | null) => {
+const renderWith = (
+  technicianSignature: string | null,
+  overrides: Partial<typeof baseProps> = {},
+) => {
   let tree: any;
   act(() => {
     tree = renderer.create(
-      <Step4Signature {...baseProps} technicianSignature={technicianSignature} />,
+      <Step4Signature
+        {...baseProps}
+        {...overrides}
+        technicianSignature={technicianSignature}
+      />,
     );
   });
   return tree;
@@ -73,12 +90,60 @@ describe('Step4Signature — displays Technician signature, never re-captures', 
     expect(allText(tree)).toContain('Signature captured at job completion');
   });
 
-  test("'' -> shows blocking 'no signature found' message, no Image, no pad", () => {
+  test("'' with no review flag -> shows a plain 'no signature on record' message, not a block", () => {
     const tree = renderWith('');
     expect(tree.root.findAllByType(Image).length).toBe(0);
     expect(tree.root.findAllByType(ActivityIndicator).length).toBe(0);
+    const text = allText(tree);
+    expect(text).toContain('No customer signature on record for this job');
+    // #12 — must no longer claim submission is blocked; that claim was removed
+    // along with PaymentSubmissionScreen's hard block on signature presence.
+    expect(text).not.toContain('must capture a signature');
+    expect(text).not.toContain('before payment can be submitted');
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // #12 (FR-9) — client unavailable/declined to sign: a review flag, not a block
+  // ═══════════════════════════════════════════════════════════════════════
+
+  test("'' with needsTeamLeadReview=true -> shows the real decline reason in a review banner, states submission is still allowed", () => {
+    const tree = renderWith('', {
+      needsTeamLeadReview: true,
+      signatureDeclineReason: 'Client left the property before work finished',
+    });
+    expect(tree.root.findAllByType(Image).length).toBe(0);
+    const text = allText(tree);
+    expect(text).toContain('Flagged for Review');
+    expect(text).toContain('Client left the property before work finished');
+    expect(text).toContain('You may still submit this payment.');
+    // The old unconditional block must be gone entirely on this path too.
+    expect(text).not.toContain('must capture a signature');
+  });
+
+  test('needsTeamLeadReview=true with no reason text falls back to a generic explanation, not a blank banner', () => {
+    const tree = renderWith('', {
+      needsTeamLeadReview: true,
+      signatureDeclineReason: '',
+    });
     expect(allText(tree)).toContain(
-      'No customer signature found for this job',
+      'The client was unavailable or declined to sign.',
     );
+  });
+
+  test('a real captured signature is shown even if needsTeamLeadReview is (inconsistently) true — signature takes priority', () => {
+    const sig = 'data:image/png;base64,REALSIGDATA';
+    const tree = renderWith(sig, {needsTeamLeadReview: true});
+    expect(tree.root.findAllByType(Image).length).toBe(1);
+    expect(allText(tree)).toContain('Signature captured at job completion');
+    expect(allText(tree)).not.toContain('Flagged for Review');
+  });
+
+  test('Final Summary "Signed" row reads "Flagged" (not "No") when needsTeamLeadReview is true', () => {
+    const tree = renderWith('', {
+      needsTeamLeadReview: true,
+      signatureDeclineReason: 'Client declined',
+    });
+    expect(allText(tree)).toContain('Flagged 🚩');
+    expect(allText(tree)).not.toContain('No ❌');
   });
 });

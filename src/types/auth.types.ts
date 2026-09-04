@@ -7,7 +7,7 @@ export interface User {
   email?: string;
   address?: string;
   role: 'client' | 'technician' | 'teamlead' | 'admin' | 'super_admin';
-  branchId?: number;
+  opmcId?: number;
   profilePhoto?: string;
   language?: string;
   notificationPreferences?: NotificationPreferences;
@@ -47,7 +47,7 @@ export interface AuthResponse {
   username: string;
   role: string;
   fullName: string;
-  branchId: number;
+  opmcId: number;
   expiresIn: number;
   phoneNumber?: string;
 }

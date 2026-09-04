@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   Alert,
   RefreshControl,
+  Image,
 } from 'react-native';
 import {useNavigation, useRoute, RouteProp, useFocusEffect} from '@react-navigation/native';
 import {StackNavigationProp} from '@react-navigation/stack';
@@ -16,8 +17,24 @@ import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
+import {store} from '@store/index';
 import {fetchIssueById, cancelIssue} from '@store/slices/issueSlice';
 import CancelIssueModal from '@components/common/CancelIssueModal';
+import {API_BASE_URL} from '@config/api.config';
+
+// Photo paths come back as "/uploads/photos/xxx.jpg" — resolve against the
+// API host, same as the fault's other backend-hosted resources. /uploads/** is now an
+// authenticated, per-file-authorized controller (QA_Compliance_Consolidated_Report.md
+// Stage G), not the old unauthenticated static handler — an <Image> tag can't attach an
+// Authorization header, so the current JWT rides along as ?token= instead; read straight
+// from the store rather than threading it through every call site (AsyncStorage is async,
+// this needs to stay a plain synchronous URL-builder).
+const resolvePhotoUrl = (path: string) => {
+  if (/^https?:\/\//i.test(path)) return path;
+  const token = store.getState().auth.token;
+  const base = `${API_BASE_URL}${path}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+};
 
 type IssueDetailRouteProp = RouteProp<ClientStackParamList, 'IssueDetail'>;
 type IssueDetailNavigationProp = StackNavigationProp<ClientStackParamList>;
@@ -222,6 +239,24 @@ const IssueDetailScreen = () => {
               </View>
             )}
           </View>
+
+          {/* Photos Card */}
+          {selectedIssue.photos && selectedIssue.photos.length > 0 && (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>
+                Photos ({selectedIssue.photos.length})
+              </Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                {selectedIssue.photos.map((uri, index) => (
+                  <Image
+                    key={index}
+                    source={{uri: resolvePhotoUrl(uri)}}
+                    style={styles.issuePhoto}
+                  />
+                ))}
+              </ScrollView>
+            </View>
+          )}
 
           {/* Timeline Card */}
           <View style={styles.card}>
@@ -430,6 +465,12 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: typography.md,
     color: colors.textPrimary,
+  },
+  issuePhoto: {
+    width: 110,
+    height: 110,
+    borderRadius: 8,
+    marginRight: spacing.sm,
   },
   timelineItem: {
     flexDirection: 'row',

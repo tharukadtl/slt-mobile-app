@@ -61,7 +61,15 @@ export interface Bill {
   issueTitle: string;
   technicianName: string;
   completedAt: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  // Mirrors ClientBillDTO.mapStatus() (backend). DISPUTED / PENDING_CLIENT_REVIEW / ACCEPTED
+  // were added for the Bill Dispute & Amendment cycle (FR-31/FR-32).
+  status:
+    | 'PENDING'
+    | 'APPROVED'
+    | 'REJECTED'
+    | 'DISPUTED'
+    | 'PENDING_CLIENT_REVIEW'
+    | 'ACCEPTED';
   materials: BillingItem[];
   laborHours: number;
   laborRate: number;

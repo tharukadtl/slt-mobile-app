@@ -61,7 +61,7 @@ const MOCK_PAYMENTS: PaymentHistoryItem[] = [
     customerName: 'Amal Perera',
     submittedAt: '2026-04-10T09:30:00',
     reviewedAt: '2026-04-10T14:00:00',
-    status: 'APPROVED',
+    status: 'FINAL',
     materialsFOC: 500,
     materialsChargeable: 2500,
     laborCharges: 1250,
@@ -103,7 +103,7 @@ const MOCK_PAYMENTS: PaymentHistoryItem[] = [
     taskId: 'TASK002',
     customerName: 'Nimal Silva',
     submittedAt: '2026-04-11T10:00:00',
-    status: 'PENDING',
+    status: 'DRAFT',
     materialsFOC: 0,
     materialsChargeable: 3500,
     laborCharges: 1000,
@@ -138,7 +138,7 @@ const MOCK_PAYMENTS: PaymentHistoryItem[] = [
     customerName: 'Kamala Fernando',
     submittedAt: '2026-04-09T14:00:00',
     reviewedAt: '2026-04-09T16:00:00',
-    status: 'REJECTED',
+    status: 'NOT_APPROVED',
     materialsFOC: 200,
     materialsChargeable: 0,
     laborCharges: 0,
@@ -173,7 +173,7 @@ const MOCK_PAYMENTS: PaymentHistoryItem[] = [
     taskId: 'TASK004',
     customerName: 'Saman Jayawardena',
     submittedAt: '2026-04-12T08:00:00',
-    status: 'UNDER_REVIEW',
+    status: 'CLARIFICATION_REQUESTED',
     materialsFOC: 0,
     materialsChargeable: 1800,
     laborCharges: 750,
@@ -243,13 +243,17 @@ const PaymentHistoryScreen = () => {
     0,
   );
   const approvedCount = filteredPayments.filter(
-    p => p.status === 'APPROVED',
+    p => p.status === 'FINAL',
   ).length;
   const pendingCount = filteredPayments.filter(
-    p => p.status === 'PENDING' || p.status === 'UNDER_REVIEW',
+    p =>
+      p.status === 'DRAFT' ||
+      p.status === 'CLARIFICATION_REQUESTED' ||
+      p.status === 'DISPUTED' ||
+      p.status === 'PENDING_CLIENT_REVIEW',
   ).length;
   const rejectedCount = filteredPayments.filter(
-    p => p.status === 'REJECTED',
+    p => p.status === 'NOT_APPROVED',
   ).length;
 
   const handleViewDetail = (payment: PaymentHistoryItem) => {
@@ -360,7 +364,7 @@ const PaymentHistoryScreen = () => {
         </View>
 
         {/* Admin Notes for Rejected */}
-        {item.status === 'REJECTED' && item.adminNotes && (
+        {item.status === 'NOT_APPROVED' && item.adminNotes && (
           <View style={styles.rejectionNote}>
             <Text style={styles.rejectionNoteIcon}>❌</Text>
             <Text style={styles.rejectionNoteText}>
@@ -408,7 +412,7 @@ const PaymentHistoryScreen = () => {
             {backgroundColor: colors.warning},
           ]}>
           <Text style={styles.summaryValue}>{pendingCount}</Text>
-          <Text style={styles.summaryLabel}>Pending</Text>
+          <Text style={styles.summaryLabel}>In Progress</Text>
         </View>
         <View
           style={[

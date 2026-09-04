@@ -47,6 +47,11 @@ const TechLanguageSettingsScreen = () => {
       Alert.alert('Success', 'Language updated successfully', [
         {text: 'OK', onPress: () => navigation.goBack()},
       ]);
+    } else {
+      Alert.alert(
+        'Error',
+        (result.payload as string) || 'Failed to save language. Please try again.',
+      );
     }
   };
 

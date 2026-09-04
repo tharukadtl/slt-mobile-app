@@ -57,7 +57,7 @@ const PhotoPicker: React.FC<PhotoPickerProps> = ({
       try {
         // Android 13+ uses READ_MEDIA_IMAGES instead of READ_EXTERNAL_STORAGE
         const permission =
-          parseInt(Platform.Version as string, 10) >= 33
+          parseInt(String(Platform.Version), 10) >= 33
             ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
             : PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE;
         const granted = await PermissionsAndroid.request(permission, {

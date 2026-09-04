@@ -22,6 +22,10 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // Detox's :detox module publishes two 'detox' flavor variants (full / coreNative);
+        // without this, Gradle can't disambiguate which one :app's androidTest classpath wants.
+        missingDimensionStrategy 'detox', 'full'
     }
     signingConfigs {
         debug {
@@ -61,6 +65,7 @@ configurations.all {
 }
 
 dependencies {
+    androidTestImplementation(project(':detox'))
     implementation("com.facebook.react:react-android")
 
     implementation(platform("com.google.firebase:firebase-bom:32.3.1"))

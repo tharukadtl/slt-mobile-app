@@ -226,10 +226,12 @@ const MaterialRequestScreen = () => {
               }),
             );
 
-            if (
-              submitMaterialRequest.fulfilled.match(result) ||
-              submitMaterialRequest.rejected.match(result)
-            ) {
+            // Was previously `fulfilled.match || rejected.match`, which is
+            // always true for an awaited thunk result — showed "✅ Submitted"
+            // even when the request was rejected (e.g. the items/materials
+            // field-name bug below meant EVERY submission actually failed
+            // with 400, silently, behind this fake success).
+            if (submitMaterialRequest.fulfilled.match(result)) {
               Alert.alert(
                 'Request Submitted ✅',
                 'Your material request has been submitted for approval',
@@ -239,6 +241,11 @@ const MaterialRequestScreen = () => {
                     onPress: () => navigation.goBack(),
                   },
                 ],
+              );
+            } else {
+              Alert.alert(
+                'Submission Failed',
+                (result.payload as string) || 'Could not submit material request.',
               );
             }
           },

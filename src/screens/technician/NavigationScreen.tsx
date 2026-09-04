@@ -22,8 +22,11 @@ import {TechnicianStackParamList} from '@appTypes/navigation.types';
 import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
-import {useAppSelector} from '@store/hooks';
+import {useAppDispatch, useAppSelector} from '@store/hooks';
+import {markArrived} from '@store/slices/technicianSlice';
 import Geolocation from '@react-native-community/geolocation';
+import technicianService from '@services/technicianService';
+import {ShortestPathResult} from '@appTypes/technician.types';
 
 type NavigationRouteProp = RouteProp<
   TechnicianStackParamList,
@@ -43,11 +46,13 @@ interface LocationPoint {
 const TechnicianNavigationScreen = () => {
   const navigation = useNavigation<NavigationNavProp>();
   const route = useRoute<NavigationRouteProp>();
+  const dispatch = useAppDispatch();
   const {taskId} = route.params;
   const mapRef = useRef<MapView>(null);
 
   const {tasks} = useAppSelector(state => state.technician);
   const task = tasks.find(t => t.id === taskId);
+  const [isMarkingArrived, setIsMarkingArrived] = useState(false);
 
   const [currentLocation, setCurrentLocation] =
     useState<LocationPoint | null>(null);
@@ -60,8 +65,17 @@ const TechnicianNavigationScreen = () => {
   const [routeCoordinates, setRouteCoordinates] = useState<LocationPoint[]>([]);
 
   const [speed, setSpeed] = useState<string>('0 km/h');
+  const [shortestPath, setShortestPath] = useState<ShortestPathResult | null>(
+    null,
+  );
+  const [isFetchingRoute, setIsFetchingRoute] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
 
   const watchId = useRef<number | null>(null);
+  // Re-fetching the route on every GPS tick would hammer the backend —
+  // only re-fetch at most once per this interval while watching position.
+  const ROUTE_REFETCH_INTERVAL_MS = 20000;
+  const lastRouteFetchAt = useRef<number>(0);
 
   const jobLocation: LocationPoint = {
     latitude: task?.location?.latitude || 6.9271,
@@ -113,8 +127,7 @@ const TechnicianNavigationScreen = () => {
         if (spd !== null && spd !== undefined) {
           setSpeed(`${(spd * 3.6).toFixed(0)} km/h`);
         }
-        calculateDistanceAndETA(loc, jobLocation);
-        setRouteCoordinates([loc, jobLocation]);
+        fetchShortestPath(loc, jobLocation);
         fitMapToCoordinates(loc);
       },
       error => {
@@ -126,8 +139,7 @@ const TechnicianNavigationScreen = () => {
           longitude: jobLocation.longitude + 0.02,
         };
         setCurrentLocation(mockLoc);
-        calculateDistanceAndETA(mockLoc, jobLocation);
-        setRouteCoordinates([mockLoc, jobLocation]);
+        fetchShortestPath(mockLoc, jobLocation);
         fitMapToCoordinates(mockLoc);
       },
       {
@@ -147,8 +159,11 @@ const TechnicianNavigationScreen = () => {
         if (spd !== null && spd !== undefined) {
           setSpeed(`${(spd * 3.6).toFixed(0)} km/h`);
         }
-        calculateDistanceAndETA(loc, jobLocation);
-        setRouteCoordinates([loc, jobLocation]);
+        // Re-fetching the route on every GPS tick would hammer the
+        // backend — only re-fetch at most once per ROUTE_REFETCH_INTERVAL_MS.
+        if (Date.now() - lastRouteFetchAt.current >= ROUTE_REFETCH_INTERVAL_MS) {
+          fetchShortestPath(loc, jobLocation);
+        }
       },
       error => console.error('Watch error:', error),
       {
@@ -160,43 +175,56 @@ const TechnicianNavigationScreen = () => {
     );
   };
 
-  const calculateDistanceAndETA = (
-    from: LocationPoint,
-    to: LocationPoint,
-  ) => {
-    const R = 6371; // Earth radius in km
-    const dLat = ((to.latitude - from.latitude) * Math.PI) / 180;
-    const dLon =
-      ((to.longitude - from.longitude) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((from.latitude * Math.PI) / 180) *
-        Math.cos((to.latitude * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    const dist = R * c;
+  // FR-29 (SRS 5.6.6) — calls the backend's Dijkstra/Haversine-fallback
+  // shortest-path endpoint (proxied through fieldops) instead of computing
+  // a client-side straight-line distance. The backend is now the single
+  // source of truth for waypoints/distance/ETA; this only renders what it
+  // returns — including being honest about `routed: false` (see JSX below).
+  const fetchShortestPath = async (from: LocationPoint, to: LocationPoint) => {
+    lastRouteFetchAt.current = Date.now();
+    setIsFetchingRoute(true);
+    try {
+      const result = await technicianService.getShortestPath(
+        from.latitude,
+        from.longitude,
+        to.latitude,
+        to.longitude,
+      );
+      setShortestPath(result);
+      setRouteError(null);
+      setRouteCoordinates(
+        result.waypoints.map(w => ({latitude: w.lat, longitude: w.lng})),
+      );
 
-    // Set distance
-    if (dist < 1) {
-      setDistance(`${(dist * 1000).toFixed(0)} m`);
-    } else {
-      setDistance(`${dist.toFixed(1)} km`);
-    }
+      const dist = result.distanceKm;
+      if (dist < 1) {
+        setDistance(`${(dist * 1000).toFixed(0)} m`);
+      } else {
+        setDistance(`${dist.toFixed(1)} km`);
+      }
 
-    // Calculate ETA (assuming 30 km/h avg speed in city)
-    const avgSpeedKmH = 30;
-    const timeMinutes = (dist / avgSpeedKmH) * 60;
-    setEtaMinutes(Math.round(timeMinutes));
-
-    if (timeMinutes < 1) {
-      setEta('Arriving now');
-    } else if (timeMinutes < 60) {
-      setEta(`${Math.round(timeMinutes)} min`);
-    } else {
-      const hours = Math.floor(timeMinutes / 60);
-      const mins = Math.round(timeMinutes % 60);
-      setEta(`${hours}h ${mins}m`);
+      const timeMinutes = result.etaMinutes;
+      setEtaMinutes(timeMinutes);
+      if (timeMinutes < 1) {
+        setEta('Arriving now');
+      } else if (timeMinutes < 60) {
+        setEta(`${timeMinutes} min`);
+      } else {
+        const hours = Math.floor(timeMinutes / 60);
+        const mins = timeMinutes % 60;
+        setEta(`${hours}h ${mins}m`);
+      }
+    } catch (error) {
+      console.error('Shortest-path error:', error);
+      setRouteError('Could not reach the navigation service.');
+      // Keep whatever route/distance/ETA we already had rather than
+      // wiping it on a transient refresh failure. Only fall back to a
+      // straight line if we've never had a route at all yet — read via
+      // the updater form so this sees the CURRENT state, not a stale
+      // closure value from when this callback was first created.
+      setRouteCoordinates(prev => (prev.length > 0 ? prev : [from, to]));
+    } finally {
+      setIsFetchingRoute(false);
     }
   };
 
@@ -256,6 +284,24 @@ const TechnicianNavigationScreen = () => {
         ],
       );
     });
+  };
+
+  const handleMarkArrived = async () => {
+    setIsMarkingArrived(true);
+    const result = await dispatch(markArrived(taskId));
+    setIsMarkingArrived(false);
+    if (markArrived.fulfilled.match(result)) {
+      Alert.alert(
+        '📍 Arrived at Location',
+        'Great! You have arrived at the job site.',
+        [{text: 'Start Work', onPress: () => navigation.goBack()}],
+      );
+    } else {
+      Alert.alert(
+        'Could Not Mark Arrival',
+        (result.payload as string) || 'Please try again.',
+      );
+    }
   };
 
   const toggleTracking = () => {
@@ -355,7 +401,9 @@ const TechnicianNavigationScreen = () => {
           </View>
         </Marker>
 
-        {/* Route Line */}
+        {/* Route Line — dashed amber = approximate straight-line estimate
+            (routed: false, today's only mode); would become a solid primary
+            line if the backend ever returns a real routed path (routed: true) */}
         {routeCoordinates.length >= 2 && (
           <>
             {/* Shadow line */}
@@ -367,9 +415,9 @@ const TechnicianNavigationScreen = () => {
             {/* Main route line */}
             <Polyline
               coordinates={routeCoordinates}
-              strokeColor={colors.primary}
+              strokeColor={shortestPath?.routed ? colors.primary : colors.warning}
               strokeWidth={4}
-              lineDashPattern={[8, 4]}
+              lineDashPattern={shortestPath?.routed ? undefined : [8, 4]}
             />
           </>
         )}
@@ -391,23 +439,50 @@ const TechnicianNavigationScreen = () => {
 
       {/* Info Panel */}
       <View style={styles.infoPanel}>
+        {/* Honesty banner — this is a straight-line estimate, not a real
+            turn-by-turn route, until the backend has road-network graph
+            data to route with (routed: true). Never let the UI imply
+            otherwise. */}
+        {shortestPath && !shortestPath.routed && (
+          <View style={styles.approxBanner}>
+            <Text style={styles.approxBannerText}>
+              ≈ Approximate direction — straight-line estimate, not a
+              turn-by-turn route
+            </Text>
+          </View>
+        )}
+        {routeError && (
+          <Text style={styles.routeErrorText}>⚠️ {routeError}</Text>
+        )}
+
         {/* ETA & Distance Row */}
         <View style={styles.statsRow}>
           <View style={styles.statItem}>
             <Text style={styles.statIcon}>⏱️</Text>
-            <Text
-              style={[
-                styles.statValue,
-                {color: getETAColor()},
-              ]}>
-              {eta}
-            </Text>
+            {isFetchingRoute && !shortestPath ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <Text
+                style={[
+                  styles.statValue,
+                  {color: getETAColor()},
+                ]}>
+                {eta}
+              </Text>
+            )}
             <Text style={styles.statLabel}>ETA</Text>
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statItem}>
             <Text style={styles.statIcon}>📏</Text>
-            <Text style={styles.statValue}>{distance}</Text>
+            {isFetchingRoute && !shortestPath ? (
+              <ActivityIndicator size="small" color={colors.primary} />
+            ) : (
+              <Text style={styles.statValue}>
+                {shortestPath && !shortestPath.routed ? '≈ ' : ''}
+                {distance}
+              </Text>
+            )}
             <Text style={styles.statLabel}>Distance</Text>
           </View>
           <View style={styles.statDivider} />
@@ -455,21 +530,15 @@ const TechnicianNavigationScreen = () => {
         {etaMinutes <= 2 && etaMinutes > 0 && (
           <TouchableOpacity
             style={styles.arrivedButton}
-            onPress={() => {
-              Alert.alert(
-                '📍 Arrived at Location',
-                'Great! You have arrived at the job site.',
-                [
-                  {
-                    text: 'Start Work',
-                    onPress: () => navigation.goBack(),
-                  },
-                ],
-              );
-            }}>
-            <Text style={styles.arrivedButtonText}>
-              ✅ I Have Arrived
-            </Text>
+            disabled={isMarkingArrived}
+            onPress={handleMarkArrived}>
+            {isMarkingArrived ? (
+              <ActivityIndicator color={colors.white} />
+            ) : (
+              <Text style={styles.arrivedButtonText}>
+                ✅ I Have Arrived
+              </Text>
+            )}
           </TouchableOpacity>
         )}
       </View>
@@ -621,6 +690,23 @@ const styles = StyleSheet.create({
     shadowOffset: {width: 0, height: -4},
     shadowOpacity: 0.15,
     shadowRadius: 8,
+  },
+  approxBanner: {
+    backgroundColor: colors.warning + '25',
+    borderRadius: 8,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  approxBannerText: {
+    fontSize: typography.xs,
+    color: colors.textPrimary,
+    fontWeight: typography.bold,
+  },
+  routeErrorText: {
+    fontSize: typography.xs,
+    color: colors.error,
+    marginBottom: spacing.sm,
   },
   statsRow: {
     flexDirection: 'row',

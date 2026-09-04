@@ -65,6 +65,15 @@ yarn-error.log
 # testing
 /coverage
 
+# Environment & secrets — no .env exists yet, closing the gap before one is added
+.env
+.env.*
+!.env.example
+
+# Claude Code's own local memory/config (not project source)
+.claude/agent-memory/
+.claude/settings.local.json
+
 # Yarn
 .yarn/*
 !.yarn/patches

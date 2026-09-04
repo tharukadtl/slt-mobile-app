@@ -19,6 +19,7 @@ import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {sendOTP} from '@store/slices/authSlice';
+import {validatePhone} from '@utils/validators';
 
 type LoginNavigationProp = StackNavigationProp<AuthStackParamList>;
 type UserType = 'client' | 'staff';
@@ -38,28 +39,20 @@ const LoginScreen = () => {
     setPhoneError('');
   };
 
+  const isValidPhone = validatePhone(phoneNumber);
+
   const handleSendOTP = async () => {
     setPhoneError('');
 
-    if (!phoneNumber) {
-      setPhoneError('Please enter your phone number');
+    if (!validatePhone(phoneNumber)) {
+      setPhoneError('Invalid phone number format');
       return;
     }
 
-    const digits = phoneNumber.startsWith('0')
-      ? phoneNumber.slice(1)
-      : phoneNumber;
-
-    if (!/^[0-9]{9}$/.test(digits)) {
-      setPhoneError('Please enter a valid mobile number (e.g. 0717 123 456)');
-      return;
-    }
-
-    const fullPhone = '0' + digits;
-    const result = await dispatch(sendOTP({phoneNumber: fullPhone}));
+    const result = await dispatch(sendOTP({phoneNumber}));
 
     if (sendOTP.fulfilled.match(result)) {
-      navigation.navigate('OTPVerify', {phoneNumber: fullPhone});
+      navigation.navigate('OTPVerify', {phoneNumber});
     } else {
       const message =
         userType === 'staff'
@@ -159,10 +152,10 @@ const LoginScreen = () => {
           <TouchableOpacity
             style={[
               styles.sendOTPButton,
-              (!phoneNumber || isLoading) && styles.sendOTPButtonDisabled,
+              (!isValidPhone || isLoading) && styles.sendOTPButtonDisabled,
             ]}
             onPress={handleSendOTP}
-            disabled={!phoneNumber || isLoading}>
+            disabled={!isValidPhone || isLoading}>
             {isLoading ? (
               <ActivityIndicator color={colors.white} />
             ) : (

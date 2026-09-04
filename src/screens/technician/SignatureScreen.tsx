@@ -6,6 +6,8 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  Modal,
+  TextInput,
 } from 'react-native';
 import SignatureCanvas from 'react-native-signature-canvas';
 import {useNavigation, useRoute, RouteProp} from '@react-navigation/native';
@@ -33,6 +35,13 @@ const SignatureScreen = () => {
   const signatureRef = useRef<any>(null);
   const [signature, setSignature] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // SRS 5.3.1.3 (FR-9) — client unavailable or declines to sign. The job can
+  // still be completed; a mandatory reason is recorded instead, flagging it
+  // for the Team Lead to review before submitting payment.
+  const [showDeclineModal, setShowDeclineModal] = useState(false);
+  const [declineReason, setDeclineReason] = useState('');
+  const [isDeclining, setIsDeclining] = useState(false);
 
   const handleClear = () => {
     signatureRef.current?.clearSignature();
@@ -84,6 +93,49 @@ const SignatureScreen = () => {
       );
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleDeclineConfirm = async () => {
+    if (!declineReason.trim()) {
+      Alert.alert(
+        'Reason Required',
+        'Please explain why the client is unavailable or declined to sign.',
+      );
+      return;
+    }
+
+    setIsDeclining(true);
+    try {
+      // No submitSignature call on this path — the job completes without a
+      // signature on record, and the decline reason is routed through this
+      // same completion request instead (JobService.updateStatus).
+      const result = await dispatch(
+        updateTaskStatus({
+          id: taskId,
+          status: 'completed',
+          completionPhotoUrls,
+          ...(completionRemarks ? {completionRemarks} : {}),
+          ...(causeOfFault ? {causeOfFault} : {}),
+          signatureDeclineReason: declineReason.trim(),
+        }),
+      );
+
+      if (updateTaskStatus.fulfilled.match(result)) {
+        setShowDeclineModal(false);
+        Alert.alert(
+          'Task Completed',
+          'Task completed without a signature. This has been flagged for your Team Lead to review before payment submission.',
+          [{text: 'OK', onPress: () => navigation.navigate('TechnicianTabs')}],
+        );
+      } else {
+        Alert.alert(
+          'Completion Failed',
+          (result.payload as string) || 'Could not complete the job.',
+        );
+      }
+    } finally {
+      setIsDeclining(false);
     }
   };
 
@@ -147,7 +199,69 @@ const SignatureScreen = () => {
             <Text style={styles.buttonText}>Complete Task</Text>
           )}
         </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.declineLink}
+          onPress={() => setShowDeclineModal(true)}
+          disabled={isSubmitting}>
+          <Text style={styles.declineLinkText}>
+            Client unavailable / declined to sign
+          </Text>
+        </TouchableOpacity>
       </View>
+
+      <Modal
+        visible={showDeclineModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowDeclineModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Client Unavailable / Declined to Sign</Text>
+            <Text style={styles.modalSubtitle}>
+              The job can still be completed. Please enter a reason — it will
+              be flagged for your Team Lead to review before payment
+              submission.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              placeholder="e.g. Client left the property before work finished"
+              placeholderTextColor={colors.textLight}
+              value={declineReason}
+              onChangeText={setDeclineReason}
+              multiline
+              numberOfLines={3}
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => {
+                  setShowDeclineModal(false);
+                  setDeclineReason('');
+                }}
+                disabled={isDeclining}>
+                <Text style={styles.modalCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.modalConfirmButton,
+                  (!declineReason.trim() || isDeclining) &&
+                    styles.buttonDisabled,
+                ]}
+                onPress={handleDeclineConfirm}
+                disabled={!declineReason.trim() || isDeclining}>
+                {isDeclining ? (
+                  <ActivityIndicator color={colors.white} />
+                ) : (
+                  <Text style={styles.modalConfirmButtonText}>
+                    Complete Without Signature
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -253,6 +367,80 @@ const styles = StyleSheet.create({
   buttonText: {
     color: colors.white,
     fontSize: typography.lg,
+    fontWeight: typography.bold,
+  },
+  declineLink: {
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+  },
+  declineLinkText: {
+    color: colors.textSecondary,
+    fontSize: typography.sm,
+    textDecorationLine: 'underline',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.lg,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    padding: spacing.lg,
+  },
+  modalTitle: {
+    fontSize: typography.lg,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+  },
+  modalSubtitle: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+    lineHeight: typography.lineHeightMd,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: spacing.md,
+    fontSize: typography.md,
+    color: colors.textPrimary,
+    textAlignVertical: 'top',
+    minHeight: 80,
+    marginBottom: spacing.md,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  modalCancelButton: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  modalCancelButtonText: {
+    color: colors.textSecondary,
+    fontSize: typography.sm,
+    fontWeight: typography.medium,
+  },
+  modalConfirmButton: {
+    flex: 2,
+    paddingVertical: spacing.sm,
+    borderRadius: 6,
+    backgroundColor: colors.warning,
+    alignItems: 'center',
+  },
+  modalConfirmButtonText: {
+    color: colors.white,
+    fontSize: typography.sm,
     fontWeight: typography.bold,
   },
 });

@@ -60,7 +60,7 @@ const KPIPerformanceScreen = () => {
   );
 
   const [selectedPeriod, setSelectedPeriod] = useState('DAILY');
-  const [expandedTechnician, setExpandedTechnician] = useState
+  const [expandedTechnician, setExpandedTechnician] = useState<
     string | null
   >(null);
 

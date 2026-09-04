@@ -17,9 +17,20 @@
  *
  * i.e. the actual COMPLETED transition only fires AFTER a real signature is
  * accepted — proving the guard runs before any network/dispatch side effect.
+ *
+ * #12 (FR-9 client-declined-signature, added for this fix): SRS 5.3.1.3 —
+ * "If the client is unavailable or declines to sign, the Technician records
+ * a reason; the job can still be completed but is flagged for Team Lead
+ * review." Covers the new "Client unavailable / declined to sign" path:
+ *   (d) tapping it opens a reason modal
+ *   (e) confirming with a blank reason is blocked (mandatory, per spec)
+ *   (f) confirming with a real reason dispatches updateTaskStatus with
+ *       status: 'completed' and signatureDeclineReason set, WITHOUT ever
+ *       calling submitSignature — the decline path is routed entirely
+ *       through the completion request, not the separate /signature call.
  */
 import React from 'react';
-import {TouchableOpacity, Text, Alert} from 'react-native';
+import {TouchableOpacity, Text, TextInput, Alert} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 
 // ---- Mocks for heavy / native leaf dependencies -----------------------------
@@ -180,5 +191,73 @@ describe('SignatureScreen — FR-9 completion guard', () => {
       'Signature Required',
       expect.any(String),
     );
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // #12 (FR-9) — "Client unavailable / declined to sign"
+  // ═══════════════════════════════════════════════════════════════════════
+
+  test('tapping "Client unavailable / declined to sign" opens the reason modal', async () => {
+    const tree = render();
+    await pressButtonWithText(tree, 'Client unavailable / declined to sign');
+
+    const texts = tree.root
+      .findAllByType(Text)
+      .map((t: any) => textOf(t));
+    expect(texts).toContain('Client Unavailable / Declined to Sign');
+  });
+
+  test('confirming with a blank reason is blocked — mandatory per SRS 5.3.1.3', async () => {
+    const tree = render();
+    await pressButtonWithText(tree, 'Client unavailable / declined to sign');
+
+    // No text typed — the confirm button is disabled, but also assert the
+    // underlying handler itself refuses a blank reason (defense in depth,
+    // matching this project's own established convention).
+    const confirmButtons = tree.root
+      .findAllByType(TouchableOpacity)
+      .filter((b: any) =>
+        b.findAllByType(Text).some((t: any) => textOf(t) === 'Complete Without Signature'),
+      );
+    expect(confirmButtons[0].props.disabled).toBe(true);
+
+    await act(async () => {
+      await confirmButtons[0].props.onPress();
+    });
+
+    expect(submitSignatureMock).not.toHaveBeenCalled();
+    expect(updateTaskStatusMock).not.toHaveBeenCalled();
+  });
+
+  test('a real decline reason dispatches COMPLETED with signatureDeclineReason, WITHOUT calling submitSignature', async () => {
+    const tree = render();
+    await pressButtonWithText(tree, 'Client unavailable / declined to sign');
+
+    const input = tree.root.findByType(TextInput);
+    act(() => {
+      input.props.onChangeText('Client left the property before work finished');
+    });
+
+    await act(async () => {
+      const confirmButtons = tree.root
+        .findAllByType(TouchableOpacity)
+        .filter((b: any) =>
+          b.findAllByType(Text).some((t: any) => textOf(t) === 'Complete Without Signature'),
+        );
+      await confirmButtons[0].props.onPress();
+    });
+
+    // The separate /signature endpoint must never be called on this path.
+    expect(submitSignatureMock).not.toHaveBeenCalled();
+
+    expect(updateTaskStatusMock).toHaveBeenCalledTimes(1);
+    const arg = updateTaskStatusMock.mock.calls[0][0];
+    expect(arg).toMatchObject({
+      id: '77',
+      status: 'completed',
+      completionPhotoUrls: 'http://x/photo1.jpg',
+      signatureDeclineReason: 'Client left the property before work finished',
+    });
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 });

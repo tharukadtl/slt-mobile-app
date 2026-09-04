@@ -120,7 +120,7 @@ const OTPVerifyScreen = () => {
           return prev - 1;
         });
       }, 1000);
-      Alert.alert('Success', 'OTP sent again successfully');
+      Alert.alert('OTP Sent', `A 6-digit OTP has been sent to ${phoneNumber}.`);
     } else {
       Alert.alert('Error', 'Failed to resend OTP');
     }

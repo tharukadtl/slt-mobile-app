@@ -15,8 +15,10 @@ import {useNavigation} from '@react-navigation/native';
 import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
-import {useAppSelector} from '@store/hooks';
+import {useAppSelector, useAppDispatch} from '@store/hooks';
+import {submitMaterialRequest} from '@store/slices/technicianSlice';
 import {formatCurrency} from '@utils/formatters';
+import technicianService from '@services/technicianService';
 
 interface Vehicle {
   id: string;
@@ -72,140 +74,20 @@ const MOCK_VEHICLE: Vehicle = {
   fuelLevel: 75,
 };
 
-const MOCK_INVENTORY: InventoryItem[] = [
-  {
-    id: '1',
-    name: 'Fiber Optic Cable',
-    category: 'Cable',
-    sku: 'CAB-FOC-001',
-    availableStock: 500,
-    unit: 'meters',
-    unitPrice: 150,
-    minThreshold: 100,
-    isFOC: false,
-  },
-  {
-    id: '2',
-    name: 'RJ45 Connector Cat6',
-    category: 'Connector',
-    sku: 'CON-RJ45-001',
-    availableStock: 200,
-    unit: 'pcs',
-    unitPrice: 25,
-    minThreshold: 50,
-    isFOC: true,
-  },
-  {
-    id: '3',
-    name: 'Network Switch 8-Port',
-    category: 'Network',
-    sku: 'NET-SW8-001',
-    availableStock: 15,
-    unit: 'pcs',
-    unitPrice: 2500,
-    minThreshold: 5,
-    isFOC: false,
-  },
-  {
-    id: '4',
-    name: 'Wireless Router',
-    category: 'Network',
-    sku: 'NET-RTR-001',
-    availableStock: 10,
-    unit: 'pcs',
-    unitPrice: 3500,
-    minThreshold: 3,
-    isFOC: false,
-  },
-  {
-    id: '5',
-    name: 'Cable Ties 100pcs',
-    category: 'Accessory',
-    sku: 'ACC-CT-001',
-    availableStock: 100,
-    unit: 'pack',
-    unitPrice: 50,
-    minThreshold: 20,
-    isFOC: true,
-  },
-  {
-    id: '6',
-    name: 'Wall Socket Cat6',
-    category: 'Socket',
-    sku: 'SOC-WL-001',
-    availableStock: 80,
-    unit: 'pcs',
-    unitPrice: 120,
-    minThreshold: 20,
-    isFOC: false,
-  },
-  {
-    id: '7',
-    name: 'Patch Cable 1m',
-    category: 'Cable',
-    sku: 'CAB-PCT-001',
-    availableStock: 150,
-    unit: 'pcs',
-    unitPrice: 200,
-    minThreshold: 30,
-    isFOC: false,
-  },
-  {
-    id: '8',
-    name: 'Signal Booster',
-    category: 'Equipment',
-    sku: 'EQP-SB-001',
-    availableStock: 20,
-    unit: 'pcs',
-    unitPrice: 1800,
-    minThreshold: 5,
-    isFOC: false,
-  },
-  {
-    id: '9',
-    name: 'Ethernet Cable 5m',
-    category: 'Cable',
-    sku: 'CAB-ETH-001',
-    availableStock: 60,
-    unit: 'pcs',
-    unitPrice: 350,
-    minThreshold: 15,
-    isFOC: false,
-  },
-  {
-    id: '10',
-    name: 'Power Adapter 12V',
-    category: 'Power',
-    sku: 'PWR-ADP-001',
-    availableStock: 30,
-    unit: 'pcs',
-    unitPrice: 450,
-    minThreshold: 8,
-    isFOC: false,
-  },
-  {
-    id: '11',
-    name: 'Fiber Splice Tray',
-    category: 'Equipment',
-    sku: 'EQP-FST-001',
-    availableStock: 25,
-    unit: 'pcs',
-    unitPrice: 800,
-    minThreshold: 5,
-    isFOC: false,
-  },
-  {
-    id: '12',
-    name: 'Network Tester',
-    category: 'Tool',
-    sku: 'TL-NT-001',
-    availableStock: 8,
-    unit: 'pcs',
-    unitPrice: 5000,
-    minThreshold: 2,
-    isFOC: false,
-  },
-];
+// Maps InventoryController's StockDTO.StockLevelDTO (materialId, materialName,
+// sku, category, unit, currentStock, minThreshold, unitPrice, isFOC/fOC) to
+// the shape this screen renders.
+const normalizeStockLevel = (s: any): InventoryItem => ({
+  id: String(s.materialId ?? s.id ?? ''),
+  name: s.materialName ?? s.name ?? '',
+  category: s.category ?? 'Other',
+  sku: s.sku ?? '',
+  availableStock: s.currentStock ?? s.availableStock ?? 0,
+  unit: s.unit ?? '',
+  unitPrice: s.unitPrice ?? 0,
+  minThreshold: s.minThreshold ?? 0,
+  isFOC: Boolean(s.isFOC ?? s.fOC ?? s.foc ?? false),
+});
 
 const MOCK_REQUESTS: MaterialRequest[] = [
   {
@@ -268,20 +150,9 @@ const MOCK_REQUESTS: MaterialRequest[] = [
   },
 ];
 
-const CATEGORIES = [
-  'All',
-  'Cable',
-  'Connector',
-  'Network',
-  'Socket',
-  'Equipment',
-  'Accessory',
-  'Power',
-  'Tool',
-];
-
 const TechnicianResourceManagementScreen = () => {
   const navigation = useNavigation();
+  const dispatch = useAppDispatch();
   const {tasks} = useAppSelector(state => state.technician);
 
   const [activeTab, setActiveTab] = useState(0);
@@ -294,18 +165,42 @@ const TechnicianResourceManagementScreen = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showInventoryDetail, setShowInventoryDetail] =
     useState<InventoryItem | null>(null);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const [isLoadingInventory, setIsLoadingInventory] = useState(false);
 
   const TABS = ['Vehicle', 'Inventory', 'Requests'];
 
-  const filteredInventory = MOCK_INVENTORY.filter(item => {
-    const matchesSearch =
-      searchText === '' ||
-      item.name.toLowerCase().includes(searchText.toLowerCase()) ||
-      item.sku.toLowerCase().includes(searchText.toLowerCase());
+  // GET /api/inventory/materials/search — debounced so we don't fire a
+  // request per keystroke. Category IDs aren't known client-side, so we
+  // search by text only and filter by category client-side below.
+  useEffect(() => {
+    let cancelled = false;
+    setIsLoadingInventory(true);
+    const timer = setTimeout(async () => {
+      try {
+        const results = await technicianService.searchMaterials(searchText || undefined);
+        if (!cancelled) {
+          setInventory(Array.isArray(results) ? results.map(normalizeStockLevel) : []);
+        }
+      } catch (error) {
+        if (!cancelled) setInventory([]);
+      } finally {
+        if (!cancelled) setIsLoadingInventory(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchText]);
+
+  const categories = ['All', ...Array.from(new Set(inventory.map(item => item.category)))];
+
+  const filteredInventory = inventory.filter(item => {
     const matchesCategory =
       selectedCategory === 'All' ||
       item.category === selectedCategory;
-    return matchesSearch && matchesCategory;
+    return matchesCategory;
   });
 
   const getStockStatus = (item: InventoryItem) => {
@@ -384,16 +279,38 @@ const TechnicianResourceManagementScreen = () => {
       return;
     }
     setIsSubmitting(true);
-    setTimeout(() => {
-      setIsSubmitting(false);
+    // This screen tracks each requested item under `id` (the backend
+    // materialId, set by normalizeStockLevel), not `materialId`, so remap
+    // id -> materialId for the thunk — which expects {materialId, quantity},
+    // the same shape the Team Lead MaterialRequestScreen sends. Passing the
+    // items straight through would send materialId: undefined and the backend
+    // would reject every submission with 400.
+    const result = await dispatch(
+      submitMaterialRequest({
+        taskId: selectedTaskId || undefined,
+        materials: requestItems.map(item => ({
+          materialId: item.id,
+          quantity: item.quantity,
+        })),
+        notes: requestNotes,
+      }),
+    );
+    setIsSubmitting(false);
+    if (submitMaterialRequest.fulfilled.match(result)) {
       setShowRequestModal(false);
       setRequestItems([]);
       setRequestNotes('');
+      setSelectedTaskId('');
       Alert.alert(
         '✅ Request Submitted',
         'Your material request has been submitted for approval',
       );
-    }, 1500);
+    } else {
+      Alert.alert(
+        'Submission Failed',
+        (result.payload as string) || 'Could not submit material request.',
+      );
+    }
   };
 
   const totalRequestCost = requestItems.reduce(
@@ -607,7 +524,7 @@ const TechnicianResourceManagementScreen = () => {
         showsHorizontalScrollIndicator={false}
         style={styles.categoryFilter}
         contentContainerStyle={styles.categoryFilterContent}>
-        {CATEGORIES.map(cat => (
+        {categories.map(cat => (
           <TouchableOpacity
             key={cat}
             style={[
@@ -725,12 +642,18 @@ const TechnicianResourceManagementScreen = () => {
         }}
         contentContainerStyle={styles.inventoryList}
         ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>📦</Text>
-            <Text style={styles.emptyText}>
-              No items found
-            </Text>
-          </View>
+          isLoadingInventory ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator size="large" color={colors.primary} />
+            </View>
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyIcon}>📦</Text>
+              <Text style={styles.emptyText}>
+                No items found
+              </Text>
+            </View>
+          )
         }
       />
     </View>

@@ -24,6 +24,7 @@ import KPIPerformanceScreen from '@screens/teamlead/KPIPerformanceScreen';
 import FieldOperationsScreen from '@screens/teamlead/FieldOperationsScreen';
 import JobNavigationScreen from '@screens/teamlead/JobNavigationScreen';
 import MaterialRequestScreen from '@screens/teamlead/MaterialRequestScreen';
+import TeamMaterialRequestsScreen from '@screens/teamlead/TeamMaterialRequestsScreen';
 import BODScreen from '@screens/teamlead/BODScreen';
 import EODScreen from '@screens/teamlead/EODScreen';
 import AssignJobsScreen from '@screens/teamlead/AssignJobsScreen';
@@ -32,9 +33,13 @@ const Tab = createBottomTabNavigator<TeamLeadTabParamList>();
 const Stack = createStackNavigator<TeamLeadStackParamList>();
 
 // ── BOD Gate ─────────────────────────────────────────────────────────────────
-// Initial screen: checks whether team lead has an active session today.
-// If YES  → replaces itself with TeamLeadTabs (dashboard).
-// If NO   → replaces itself with BOD screen.
+// Initial screen: checks whether a DaySession row exists for today's
+// calendar date (GET /api/jobs/session → findByTeamLeadIdAndSessionDate,
+// which matches on date regardless of ACTIVE/CLOSED status — so this
+// correctly blocks re-entry into BOD after EOD, not just while a session
+// is still active).
+// If a row exists (any status) → replaces itself with TeamLeadTabs (dashboard).
+// If no row for today         → replaces itself with BOD screen.
 // Shows a spinner while the check is in flight.
 const BODGateScreen = () => {
   const dispatch = useAppDispatch();
@@ -44,11 +49,11 @@ const BODGateScreen = () => {
     dispatch(checkTodaysSession())
       .unwrap()
       .then(() => {
-        // Active session exists → go to dashboard
+        // Session-for-today exists (BOD already done, active or closed) → dashboard
         navigation.replace('TeamLeadTabs');
       })
       .catch(() => {
-        // No session → must do BOD first
+        // No session row for today's date → must do BOD first
         navigation.replace('BOD');
       });
   }, []);
@@ -118,6 +123,7 @@ const TeamLeadNavigator = () => {
       <Stack.Screen name="FieldOperations" component={FieldOperationsScreen} />
       <Stack.Screen name="JobNavigation" component={JobNavigationScreen} />
       <Stack.Screen name="MaterialRequest" component={MaterialRequestScreen} />
+      <Stack.Screen name="TeamMaterialRequests" component={TeamMaterialRequestsScreen} />
     </Stack.Navigator>
   );
 };

@@ -11,10 +11,17 @@ export type TaskStatus =
 
 export type TaskPriority = 'HIGH' | 'MEDIUM' | 'LOW';
 
+// Mirrors the backend's Payment.PaymentStatus enum (fieldops) exactly —
+// DRAFT/FINAL/NOT_APPROVED are the admin-review outcomes; the other 4 are
+// the bill dispute/amendment cycle (SRS 5.5.2.1).
 export type PaymentStatus =
   | 'DRAFT'
   | 'FINAL'
-  | 'NOT_APPROVED';
+  | 'NOT_APPROVED'
+  | 'CLARIFICATION_REQUESTED'
+  | 'DISPUTED'
+  | 'PENDING_CLIENT_REVIEW'
+  | 'CLIENT_ACCEPTED';
 
 export interface Task {
   id: string;
@@ -37,6 +44,19 @@ export interface Task {
   notes?: string;
   rejectionReason?: string;
   rejectedByRole?: string;
+  // SRS 5.3.1.2 — categorized rejection (issue mismatch / material delay /
+  // other). All optional: a job rejected before this feature shipped, or by
+  // a caller that doesn't send them, simply has no category.
+  rejectionCategory?: 'ISSUE_MISMATCH' | 'MATERIAL_DELAY' | 'OTHER';
+  observedIssueType?: 'INTERNET' | 'PHONE' | 'FIBER' | 'TV' | 'OTHER';
+  linkedMaterialRequestId?: number;
+  linkedMaterialRequestNumber?: string;
+  // SRS 5.3.1.4 — set when a Technician's shift ended with this job still
+  // open; this is the data shape the future Team Lead pending/escalation
+  // queue (Major finding #6) will read to show why. Not consumed anywhere
+  // yet — added now so that later work doesn't need a data-shape migration.
+  eodHandoverReason?: string;
+  eodHandoverAt?: string;
   jobNumber?: string;
   faultNumber?: string;
   teamLeadId?: string;
@@ -47,6 +67,20 @@ export interface Task {
   completedAt?: string;
   acceptedAt?: string;
   startedAt?: string;
+}
+
+// Mirrors the fields this app actually reads from backend's
+// MaterialRequestDTO.RequestResponse (InventoryController's
+// GET /api/inventory/material-requests/my) — used by the Material-Delay
+// rejection path (SRS 5.3.1.2) to let the Technician link an outstanding
+// request instead of typing free text.
+export interface MaterialRequestSummary {
+  id: number;
+  requestNumber: string;
+  taskId?: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'DELIVERED' | 'CANCELLED';
+  totalItems: number;
+  submittedTimeAgo?: string;
 }
 
 export interface Material {
@@ -187,9 +221,39 @@ export interface BODCheckIn {
   userId: string;
   checkInTime: string;
   checkOutTime?: string;
-  latitude: number;
-  longitude: number;
+  latitude: number | null;
+  longitude: number | null;
   address: string;
+}
+
+// Mirrors backend AttendanceDTO.TodaySummaryDTO — always scoped to the
+// server's current calendar date, so it's the source of truth for whether
+// BOD/EOD has already happened today (a local-only flag can't tell that).
+export interface TodayAttendance {
+  isCheckedIn: boolean;
+  checkInTime: string | null;
+  checkOutTime: string | null;
+  currentStatus: 'NOT_CHECKED_IN' | 'CHECKED_IN' | 'CHECKED_OUT';
+  date: string;
+}
+
+// Mirrors the backend's ShortestPathResponseDTO (fieldops), which itself
+// mirrors the Flask AI module's POST /api/ai/shortest-path response
+// (FR-29, SRS 5.6.6). routed=false means this is a Haversine straight-line
+// estimate, not a real routed path — the AI module has no road-network
+// graph data source configured yet. UI must not present it as a real route.
+export interface ShortestPathWaypoint {
+  lat: number;
+  lng: number;
+}
+
+export interface ShortestPathResult {
+  waypoints: ShortestPathWaypoint[];
+  distanceKm: number;
+  etaMinutes: number;
+  routed: boolean;
+  algorithm: string;
+  avgSpeedKmh: number;
 }
 
 export interface TechnicianState {
@@ -203,6 +267,7 @@ export interface TechnicianState {
   selectedPayment: PaymentHistoryItem | null;
   bodCheckIn: BODCheckIn | null;
   hasBODToday: boolean;
+  todayAttendance: TodayAttendance | null;
   faults: any[];
   currentLocation: {
     latitude: number;
