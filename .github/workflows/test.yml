@@ -19,3 +19,10 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # jest-junit (configured in jest.config.js) writes reports/jest-junit.xml.
+      # if: always() so a summary appears even when tests fail. ubuntu-latest
+      # ships python3 by default, no setup step needed.
+      - name: Test summary
+        if: always()
+        run: python3 .github/scripts/summarize_junit.py "reports/jest-junit.xml"

@@ -16,6 +16,13 @@ module.exports = {
     'node_modules/(?!((jest-)?react-native|@react-native(-community)?|@react-navigation/.*|@reduxjs/toolkit|immer|redux|redux-thunk|reselect|react-redux))',
   ],
   setupFiles: ['<rootDir>/jest.setup.js'],
+  // jest-junit writes reports/jest-junit.xml, which the CI workflow's summary
+  // step reads to build the Job Summary. 'default' keeps the normal console
+  // reporter too -- this adds a second reporter, it doesn't replace one.
+  reporters: [
+    'default',
+    ['jest-junit', {outputDirectory: 'reports', outputName: 'jest-junit.xml'}],
+  ],
   // babel-plugin-module-resolver only rewrites the path aliases when they are
   // written as literals, so `require.resolve(someVariable)` never sees them.
   // Mirror the same aliases (babel.config.js / tsconfig.json paths) in Jest's

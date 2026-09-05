@@ -1,3 +1,6 @@
+# jest-junit output (generated per CI run, read by the summary step)
+reports/
+
 # OSX
 #
 .DS_Store
