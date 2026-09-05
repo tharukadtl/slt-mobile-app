@@ -30,7 +30,7 @@
  * the GPS-success branch's failure/success handling.
  */
 import React from 'react';
-import {TouchableOpacity, Text, Alert, PermissionsAndroid} from 'react-native';
+import {TouchableOpacity, Text, TextInput, Alert, PermissionsAndroid} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 
 jest.useFakeTimers();
@@ -141,11 +141,25 @@ const render = async () => {
   return tree;
 };
 
+// ATT-008 — both BOD and EOD now gate on an odometer reading before
+// proceeding (HomeScreen.tsx's handleBODCheckIn/handleEODCheckOut), the same
+// way they already gate on location permission.
+const fillOdometer = async (tree: any, value: string) => {
+  const input = tree.root
+    .findAllByType(TextInput)
+    .find((i: any) => /odometer/i.test(String(i.props.placeholder ?? '')));
+  expect(input).toBeDefined();
+  await act(async () => {
+    input!.props.onChangeText(value);
+  });
+};
+
 /**
  * Taps "BOD Check-In" (which fails to get a GPS fix) and then presses the real
  * "Check In Anyway" button on the resulting "Location Unavailable" alert.
  */
 const checkInWithoutGps = async (tree: any, alertSpy: jest.SpyInstance) => {
+  await fillOdometer(tree, '45000');
   const bodButton = tappable(tree, 'BOD Check-In');
   expect(bodButton).toBeDefined();
   await act(async () => {
@@ -261,6 +275,7 @@ describe('HomeScreen BOD check-in — GPS-unavailable fallback (Critical #28)', 
  * act() flush below is what lets its async geolocation-error callback settle.
  */
 const checkOutWithoutGps = async (tree: any, alertSpy: jest.SpyInstance) => {
+  await fillOdometer(tree, '45180');
   const eodButton = tappable(tree, '🌆 Checkout');
   expect(eodButton).toBeDefined();
   await act(async () => {

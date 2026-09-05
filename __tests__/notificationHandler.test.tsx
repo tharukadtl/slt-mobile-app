@@ -117,30 +117,13 @@ describe('NOTIF-009 — notification tap routing', () => {
   });
 
   /**
-   * The same handler, driven with the vocabulary it was actually written against. This is not part
-   * of NOTIF-009's steps — it is here so that a red verdict above is unambiguous about *where* the
-   * break is: the routing table itself works, it is keyed on strings the backend never sends.
+   * Resolved 2026-09-05: useNotifications.ts now keys on referenceType (the backend's real,
+   * stable category field, sent as an FCM data entry by NotificationService.sendPush) instead of
+   * the private type vocabulary this test used to drive (STATUS_UPDATE/TECHNICIAN_ASSIGNED/
+   * JOB_COMPLETED/BILLING — never sent by the backend for these; also missing referenceId/
+   * referenceType entirely, which routing now requires). That vocabulary is retired, not a second
+   * valid input shape, so this test is no longer meaningful and was removed rather than kept green
+   * by resurrecting dead code paths. The real contract is the first test above, which drives the
+   * hook with the backend's actual payload shape end-to-end.
    */
-  it('routes correctly for the four types the hook was written against', () => {
-    const {tree, tap} = mountAndGetHandler();
-
-    try {
-      tap({type: 'TECHNICIAN_ASSIGNED', issueId: FAULT_ID, title: 't', body: 'b'});
-      expect(mockNavigate).toHaveBeenCalledWith('IssueDetail', {issueId: FAULT_ID});
-
-      mockNavigate.mockClear();
-      tap({type: 'STATUS_UPDATE', issueId: FAULT_ID, title: 't', body: 'b'});
-      expect(mockNavigate).toHaveBeenCalledWith('IssueDetail', {issueId: FAULT_ID});
-
-      mockNavigate.mockClear();
-      tap({type: 'JOB_COMPLETED', issueId: FAULT_ID, title: 't', body: 'b'});
-      expect(mockNavigate).toHaveBeenCalledWith('IssueDetail', {issueId: FAULT_ID});
-
-      mockNavigate.mockClear();
-      tap({type: 'BILLING', billId: PAYMENT_ID, title: 't', body: 'b'});
-      expect(mockNavigate).toHaveBeenCalledWith('BillDetail', {billId: PAYMENT_ID});
-    } finally {
-      act(() => tree.unmount());
-    }
-  });
 });

@@ -22,6 +22,7 @@ const initialState: TechnicianState = {
   selectedPayment: null,
   bodCheckIn: null,
   hasBODToday: false,
+  todaySessionStatus: null,
   todayAttendance: null,
   faults: [],
   currentLocation: null,
@@ -241,7 +242,14 @@ export const submitBODCheckIn = createAsyncThunk(
     // must send null, never a fake coordinate like (0,0), which the backend
     // (AttendanceDTO.CheckInRequest) would otherwise store as an
     // indistinguishable-from-real phantom location.
-    data: {latitude: number | null; longitude: number | null; address: string},
+    data: {
+      latitude: number | null;
+      longitude: number | null;
+      address: string;
+      // ATT-008 — starting odometer reading, required client-side before
+      // BOD check-in completes.
+      odometerStart?: number;
+    },
     {rejectWithValue},
   ) => {
     try {
@@ -270,6 +278,10 @@ export const submitEODCheckOut = createAsyncThunk(
       // SRS 5.3.1.4 — one mandatory reason per job still open at checkout;
       // omitted entirely when there are none.
       openJobReasons?: {jobId: string; reason: string}[];
+      // ATT-008 — ending odometer reading, required client-side before EOD
+      // check-out completes. The response echoes back distanceKm once both
+      // readings exist (AttendanceService.mapToResponse).
+      odometerEnd?: number;
     },
     {rejectWithValue},
   ) => {
@@ -600,11 +612,16 @@ const technicianSlice = createSlice({
       state.isLoading = false;
       state.error = action.payload as string;
     });
-    builder.addCase(checkTodaysSession.fulfilled, state => {
+    builder.addCase(checkTodaysSession.fulfilled, (state, action) => {
       state.hasBODToday = true;
+      // GET /api/jobs/session returns today's session regardless of status
+      // (ACTIVE or CLOSED) — keep it instead of discarding it, so the
+      // dashboard can tell "day running" from "day over" (ATT-017).
+      state.todaySessionStatus = action.payload?.status ?? null;
     });
     builder.addCase(checkTodaysSession.rejected, state => {
       state.hasBODToday = false;
+      state.todaySessionStatus = null;
     });
     builder.addCase(fetchTodayAttendance.fulfilled, (state, action) => {
       state.todayAttendance = action.payload;

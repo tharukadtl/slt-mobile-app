@@ -267,6 +267,10 @@ export interface TechnicianState {
   selectedPayment: PaymentHistoryItem | null;
   bodCheckIn: BODCheckIn | null;
   hasBODToday: boolean;
+  // ATT-017 — distinguishes "BOD done, day running" (ACTIVE) from "BOD and
+  // EOD both done" (CLOSED); hasBODToday alone can't tell these apart since
+  // it stays true after EOD (by design — it's what stops a second BOD).
+  todaySessionStatus: 'ACTIVE' | 'CLOSED' | null;
   todayAttendance: TodayAttendance | null;
   faults: any[];
   currentLocation: {

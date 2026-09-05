@@ -9,29 +9,24 @@ const useNotifications = () => {
 
   const handleNotification = useCallback(
     (data: NotificationData) => {
-      switch (data.type) {
-        case 'STATUS_UPDATE':
-        case 'TECHNICIAN_ASSIGNED':
-          if (data.issueId) {
+      // Keyed on referenceType — the small, stable category the backend
+      // already attaches to every notification (NotificationService.sendPush's
+      // FCM data payload) — rather than the full, ever-growing NotificationType
+      // enum (FAULT_REPORTED/FAULT_ASSIGNED/PAYMENT_APPROVED/... 20+ values).
+      switch (data.referenceType) {
+        case 'FAULT':
+          if (data.referenceId) {
             navigation.navigate(
               'IssueDetail' as never,
-              {issueId: data.issueId} as never,
+              {issueId: data.referenceId} as never,
             );
           }
           break;
-        case 'JOB_COMPLETED':
-          if (data.issueId) {
-            navigation.navigate(
-              'IssueDetail' as never,
-              {issueId: data.issueId} as never,
-            );
-          }
-          break;
-        case 'BILLING':
-          if (data.billId) {
+        case 'PAYMENT':
+          if (data.referenceId) {
             navigation.navigate(
               'BillDetail' as never,
-              {billId: data.billId} as never,
+              {billId: data.referenceId} as never,
             );
           } else {
             navigation.navigate('BillingHistory' as never);

@@ -144,22 +144,23 @@ const render = async () => {
   return tree;
 };
 
-/** Every string the screen has put in front of the user via Alert, flattened. */
-const allAlertText = (alertSpy: jest.SpyInstance) =>
-  alertSpy.mock.calls
-    .map((c: any[]) => [c[0], c[1]].filter(Boolean).join('\n'))
-    .join('\n---\n');
-
 describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
   let alertSpy: jest.SpyInstance;
   let permSpy: jest.SpyInstance;
+
+  // Resolved 2026-09-05: AttendanceService.mapToResponse now computes
+  // distanceKm = odometerEnd - odometerStart (same as VehicleAssignment's),
+  // echoed back on the checkout response. 25 here stands in for a real
+  // backend-computed figure — the point under test is that the screen reads
+  // and displays whatever the response actually carries, not a guess.
+  const MOCK_DISTANCE_KM = 25;
 
   beforeEach(() => {
     mockDispatch.mockClear();
     submitEODCheckOutMock.mockClear();
     mockGetCurrentPosition.mockClear();
     mockFetch.mockClear();
-    unwrapResult = () => Promise.resolve({});
+    unwrapResult = () => Promise.resolve({distanceKm: MOCK_DISTANCE_KM});
     permSpy = jest
       .spyOn(PermissionsAndroid, 'request')
       .mockResolvedValue(PermissionsAndroid.RESULTS.GRANTED as any);
@@ -173,6 +174,22 @@ describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
 
   test('checkOut_withJobSummary', async () => {
     const tree = await render();
+
+    // ── Step 5 (moved earlier): the ending odometer reading must be entered before
+    // the EOD control even raises its confirmation — HomeScreen.tsx's
+    // handleEODCheckOut now gates on it the same way it already gates on
+    // location permission, so a technician cannot reach checkout without one.
+    const odometerInputs = tree.root
+      .findAllByType(TextInput)
+      .filter((i: any) =>
+        /odometer/i.test(
+          `${i.props.placeholder ?? ''} ${i.props.testID ?? ''} ${i.props.accessibilityLabel ?? ''}`,
+        ),
+      );
+    expect(odometerInputs.length).toBeGreaterThan(0);
+    await act(async () => {
+      odometerInputs[0].props.onChangeText('45280');
+    });
 
     // ── Steps 1-2: reach the EOD control ────────────────────────────────────────────
     // Label correction: the row calls it `eodCheckOutBtn`. The screen has two real
@@ -198,17 +215,6 @@ describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
     // derived from the task list's own statuses, not passed in.
     expect(String(confirm![1])).toContain('Completed: 2/2 jobs');
 
-    // ── Step 5: type the final odometer reading ─────────────────────────────────────
-    // Captured here (where the row expects the field to be) but asserted at the very
-    // end, so this gap does not abort the rest of the flow and hide its verdicts.
-    const odometerInputs = tree.root
-      .findAllByType(TextInput)
-      .filter((i: any) =>
-        /odometer/i.test(
-          `${i.props.placeholder ?? ''} ${i.props.testID ?? ''} ${i.props.accessibilityLabel ?? ''}`,
-        ),
-      );
-
     // ── Steps 6-7: confirm the check-out ────────────────────────────────────────────
     const confirmButton = (confirm![2] as any[]).find((b: any) =>
       String(b.text).includes('Check Out'),
@@ -219,6 +225,8 @@ describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
     });
 
     expect(submitEODCheckOutMock).toHaveBeenCalledTimes(1);
+    // The real ending reading was genuinely dispatched, not merely displayed.
+    expect(submitEODCheckOutMock.mock.calls[0][0]).toMatchObject({odometerEnd: 45280});
 
     // ── Step 9: success is reported only after the dispatch really resolved ─────────
     const success = alertSpy.mock.calls.find((c: any[]) =>
@@ -226,29 +234,8 @@ describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
     );
     expect(success).toBeDefined();
     expect(String(success![1])).toContain('Completed: 2 jobs');
-
-    // ── Steps 5 and 8, the two genuine gaps, asserted last ──────────────────────────
-    // PRODUCTION CHANGE REQUIRED. Neither exists on the Technician EOD path:
-    //  - no odometer field anywhere on HomeScreen (the string "odometer" appears only
-    //    in the TEAM LEAD's screens/teamlead/BODScreen.tsx and EODScreen.tsx, which
-    //    post odometerStart/odometerEnd to /api/jobs/bod and /api/jobs/eod on the
-    //    day_sessions row — an individual technician's attendance carries none);
-    //  - and therefore no daily mileage to display. The backend cannot supply one
-    //    either: AttendanceDTO.AttendanceResponse has no mileage field and
-    //    check_in_out has no odometer column (see ATT-005 and ATT-011).
-    const gaps: string[] = [];
-    if (odometerInputs.length === 0) {
-      gaps.push(
-        'no final-odometer input is rendered anywhere on the Technician EOD flow',
-      );
-    }
-    if (!/mileage/i.test(allAlertText(alertSpy))) {
-      gaps.push(
-        'the check-out result never mentions the day\'s mileage. Shown instead: '
-          + JSON.stringify(String(success![1])),
-      );
-    }
-    expect(gaps).toEqual([]);
+    // ── Step 8: the day's mileage, read from the response — not hardcoded ───────────
+    expect(String(success![1])).toContain(`Mileage: ${MOCK_DISTANCE_KM} km`);
 
     act(() => tree.unmount());
   });

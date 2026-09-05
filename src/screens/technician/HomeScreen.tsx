@@ -35,32 +35,15 @@ import {Task, MaterialRequestSummary} from '@appTypes/technician.types';
 import technicianService from '@services/technicianService';
 import offlineQueue from '@services/offlineQueue';
 import {subscribeToConnectivity} from '@services/connectivityService';
+import {
+  RejectionCategory,
+  ObservedIssueType,
+  REJECTION_CATEGORIES,
+  OBSERVED_ISSUE_TYPES,
+} from '../../constants/rejectionCategories';
 
 type TechnicianHomeNavigationProp =
   StackNavigationProp<TechnicianStackParamList>;
-
-// SRS 5.3.1.2 — On-Site Issue Escalation and Material-Delay Rejection are two
-// distinct paths, not one generic reject. 'OTHER' covers every other reject
-// reason (e.g. customer unavailable, duplicate job) that isn't either of those.
-type RejectionCategory = 'ISSUE_MISMATCH' | 'MATERIAL_DELAY' | 'OTHER';
-type ObservedIssueType = 'INTERNET' | 'PHONE' | 'FIBER' | 'TV' | 'OTHER';
-
-const REJECTION_CATEGORIES: {value: RejectionCategory; icon: string; label: string}[] = [
-  {value: 'ISSUE_MISMATCH', icon: '🔀', label: 'Issue Mismatch'},
-  {value: 'MATERIAL_DELAY', icon: '📦', label: 'Material Delay'},
-  {value: 'OTHER', icon: '❓', label: 'Other'},
-];
-
-// Mirrors the backend's Fault.FaultCategory enum (fieldops) — the closed
-// vocabulary an Admin/Team Lead already assigns a fault from, reused here so
-// "observed issue type" is directly comparable to what was assigned.
-const OBSERVED_ISSUE_TYPES: {value: ObservedIssueType; icon: string; label: string}[] = [
-  {value: 'INTERNET', icon: '🌐', label: 'Internet'},
-  {value: 'PHONE', icon: '📞', label: 'Phone'},
-  {value: 'FIBER', icon: '🔌', label: 'Fiber'},
-  {value: 'TV', icon: '📺', label: 'TV'},
-  {value: 'OTHER', icon: '🔧', label: 'Other'},
-];
 
 // SRS 5.3.1.4 — EOD Pending-Task Handover. Matches the backend's
 // AttendanceService.OPEN_JOB_STATUSES exactly (same 4 statuses the old
@@ -124,6 +107,10 @@ const TechnicianHomeScreen = () => {
   const [checkInTime, setCheckInTime] = useState<string | null>(
     bodCheckIn?.checkInTime || null,
   );
+  // ATT-008 — daily mileage. Required client-side before BOD/EOD completes,
+  // same gating pattern as requestLocationPermission below (Alert + return).
+  const [odometerStartInput, setOdometerStartInput] = useState('');
+  const [odometerEndInput, setOdometerEndInput] = useState('');
 
   // Calendar-date-scoped BOD/EOD status, sourced from the backend (not a
   // local flag) — this is what can't be bypassed by an EOD resetting local
@@ -299,6 +286,12 @@ const TechnicianHomeScreen = () => {
       return;
     }
 
+    const odometerStart = parseInt(odometerStartInput, 10);
+    if (!odometerStartInput.trim() || Number.isNaN(odometerStart)) {
+      Alert.alert('Odometer Required', 'Please enter your starting odometer reading before checking in.');
+      return;
+    }
+
     const hasPermission = await requestLocationPermission();
     if (!hasPermission) {
       Alert.alert('Error', 'Location permission required for check-in');
@@ -324,7 +317,7 @@ const TechnicianHomeScreen = () => {
               onPress: async () => {
                 try {
                   await dispatch(
-                    submitBODCheckIn({latitude, longitude, address}),
+                    submitBODCheckIn({latitude, longitude, address, odometerStart}),
                   ).unwrap();
                 } catch (err: any) {
                   // Don't claim success on a rejected check-in — mirrors the
@@ -376,6 +369,7 @@ const TechnicianHomeScreen = () => {
                       latitude: null,
                       longitude: null,
                       address: 'Location unavailable',
+                      odometerStart,
                     }),
                   ).unwrap();
                 } catch (err: any) {
@@ -412,14 +406,18 @@ const TechnicianHomeScreen = () => {
     minutes: number,
     openJobReasons?: {jobId: string; reason: string}[],
   ) => {
+    // Validated non-empty/numeric by handleEODCheckOut before either caller
+    // (the plain confirm below, or the EOD handover modal) ever reaches here.
+    const odometerEnd = parseInt(odometerEndInput, 10);
     setIsCheckingOut(true);
     Geolocation.getCurrentPosition(
       async position => {
         const {latitude, longitude} = position.coords;
         const address = await getAddressFromCoords(latitude, longitude);
+        let result: any;
         try {
-          await dispatch(
-            submitEODCheckOut({latitude, longitude, address, openJobReasons}),
+          result = await dispatch(
+            submitEODCheckOut({latitude, longitude, address, openJobReasons, odometerEnd}),
           ).unwrap();
         } catch (err: any) {
           // Don't claim success on a rejected checkout (e.g. the backend's
@@ -433,17 +431,22 @@ const TechnicianHomeScreen = () => {
         setCheckInTime(null);
         setIsCheckingOut(false);
         dispatch(fetchTodayAttendance());
+        // Mileage only exists when both readings exist — real, computed by
+        // the backend (AttendanceService.mapToResponse), never guessed here.
+        const mileageLine =
+          result?.distanceKm != null ? `\nMileage: ${result.distanceKm} km` : '';
         Alert.alert(
           '✅ Checked Out',
-          `Total: ${hours}h ${minutes}m\nCompleted: ${completedJobs} jobs\nGood work today!`,
+          `Total: ${hours}h ${minutes}m\nCompleted: ${completedJobs} jobs\nGood work today!${mileageLine}`,
         );
       },
       async error => {
         // This path must hit the backend like the GPS-success branch above —
         // alerting "Checked Out" without dispatching left the technician still
         // checked in server-side while being told otherwise (Critical #29).
+        let result: any;
         try {
-          await dispatch(
+          result = await dispatch(
             submitEODCheckOut({
               // null, not (0,0) — a fake coordinate would be indistinguishable
               // from a real check-out at 0°N 0°E. AttendanceDTO.CheckOutRequest
@@ -452,6 +455,7 @@ const TechnicianHomeScreen = () => {
               longitude: null,
               address: 'Location unavailable',
               openJobReasons,
+              odometerEnd,
             }),
           ).unwrap();
         } catch (err: any) {
@@ -462,7 +466,9 @@ const TechnicianHomeScreen = () => {
         setCheckInTime(null);
         setIsCheckingOut(false);
         dispatch(fetchTodayAttendance());
-        Alert.alert('✅ Checked Out', `Total: ${hours}h ${minutes}m`);
+        const mileageLine =
+          result?.distanceKm != null ? `\nMileage: ${result.distanceKm} km` : '';
+        Alert.alert('✅ Checked Out', `Total: ${hours}h ${minutes}m${mileageLine}`);
       },
       {enableHighAccuracy: true, timeout: 10000},
     );
@@ -475,6 +481,10 @@ const TechnicianHomeScreen = () => {
     }
     if (!checkInTime) {
       Alert.alert('Error', 'You have not checked in today');
+      return;
+    }
+    if (!odometerEndInput.trim() || Number.isNaN(parseInt(odometerEndInput, 10))) {
+      Alert.alert('Odometer Required', 'Please enter your ending odometer reading before checking out.');
       return;
     }
 
@@ -956,26 +966,36 @@ const TechnicianHomeScreen = () => {
               </View>
             </View>
           ) : !checkInTime ? (
-            <TouchableOpacity
-              style={styles.bodButton}
-              onPress={handleBODCheckIn}
-              disabled={isCheckingIn}>
-              {isCheckingIn ? (
-                <ActivityIndicator color={colors.white} />
-              ) : (
-                <>
-                  <Text style={styles.bodButtonIcon}>🌅</Text>
-                  <View>
-                    <Text style={styles.bodButtonTitle}>
-                      BOD Check-In
-                    </Text>
-                    <Text style={styles.bodButtonSubtitle}>
-                      Tap to start your day
-                    </Text>
-                  </View>
-                </>
-              )}
-            </TouchableOpacity>
+            <View>
+              <TextInput
+                style={styles.odometerInput}
+                placeholder="Starting odometer reading (km)"
+                placeholderTextColor={colors.textLight}
+                keyboardType="number-pad"
+                value={odometerStartInput}
+                onChangeText={setOdometerStartInput}
+              />
+              <TouchableOpacity
+                style={styles.bodButton}
+                onPress={handleBODCheckIn}
+                disabled={isCheckingIn}>
+                {isCheckingIn ? (
+                  <ActivityIndicator color={colors.white} />
+                ) : (
+                  <>
+                    <Text style={styles.bodButtonIcon}>🌅</Text>
+                    <View>
+                      <Text style={styles.bodButtonTitle}>
+                        BOD Check-In
+                      </Text>
+                      <Text style={styles.bodButtonSubtitle}>
+                        Tap to start your day
+                      </Text>
+                    </View>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
           ) : (
             <View style={styles.checkedInCard}>
               <View style={styles.checkedInInfo}>
@@ -986,6 +1006,14 @@ const TechnicianHomeScreen = () => {
                   at{' '}
                   {new Date(checkInTime).toLocaleTimeString()}
                 </Text>
+                <TextInput
+                  style={styles.odometerInput}
+                  placeholder="Ending odometer reading (km)"
+                  placeholderTextColor={colors.textLight}
+                  keyboardType="number-pad"
+                  value={odometerEndInput}
+                  onChangeText={setOdometerEndInput}
+                />
               </View>
               <TouchableOpacity
                 style={styles.eodButton}
@@ -1445,6 +1473,17 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: typography.xs,
     fontWeight: typography.bold,
+  },
+  odometerInput: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: typography.sm,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
   },
   bodButton: {
     backgroundColor: colors.success,

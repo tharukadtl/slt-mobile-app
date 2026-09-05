@@ -10,22 +10,33 @@ import {
   Linking,
   ActivityIndicator,
   Image,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import MapView, {Marker, PROVIDER_GOOGLE} from 'react-native-maps';
 import {useNavigation, useRoute, RouteProp} from '@react-navigation/native';
 import {StackNavigationProp} from '@react-navigation/stack';
 import {TechnicianStackParamList} from '@appTypes/navigation.types';
+import {MaterialRequestSummary} from '@appTypes/technician.types';
 import {colors} from '@theme/colors';
 import {typography} from '@theme/typography';
 import {spacing} from '@theme/spacing';
 import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {fetchTasks, updateTaskStatus} from '@store/slices/technicianSlice';
 import uploadService from '@services/uploadService';
+import technicianService from '@services/technicianService';
 import {
   launchCamera,
   launchImageLibrary,
   MediaType,
 } from 'react-native-image-picker';
+import {
+  RejectionCategory,
+  ObservedIssueType,
+  REJECTION_CATEGORIES,
+  OBSERVED_ISSUE_TYPES,
+} from '../../constants/rejectionCategories';
 
 type TaskDetailRouteProp = RouteProp<   
   TechnicianStackParamList,
@@ -97,6 +108,22 @@ const TechnicianTaskDetailScreen = () => {
   const [startTime, setStartTime] = useState<Date | null>(null);
   const [elapsed, setElapsed] = useState('00:00:00');
   const [showMaterials, setShowMaterials] = useState(false);
+
+  // SRS 5.3.1.2 — Reject categorization, reachable from job detail (not just
+  // the HomeScreen job-card shortcut). Same shape/fields as HomeScreen's own
+  // reject flow, so a job rejected from either screen dispatches identically.
+  const [rejectModal, setRejectModal] = useState({
+    visible: false,
+    reason: '',
+    category: null as RejectionCategory | null,
+    observedIssueType: null as ObservedIssueType | null,
+    linkedMaterialRequestId: null as number | null,
+  });
+  const [outstandingRequests, setOutstandingRequests] = useState<
+    MaterialRequestSummary[]
+  >([]);
+  const [loadingOutstandingRequests, setLoadingOutstandingRequests] =
+    useState(false);
 
   useEffect(() => {
     if (tasks.length === 0) {
@@ -308,6 +335,79 @@ const TechnicianTaskDetailScreen = () => {
     );
   };
 
+  const openRejectModal = () => {
+    setRejectModal({
+      visible: true,
+      reason: '',
+      category: null,
+      observedIssueType: null,
+      linkedMaterialRequestId: null,
+    });
+    setOutstandingRequests([]);
+  };
+
+  const selectRejectionCategory = async (category: RejectionCategory) => {
+    setRejectModal(m => ({
+      ...m,
+      category,
+      observedIssueType: null,
+      linkedMaterialRequestId: null,
+    }));
+    if (category === 'MATERIAL_DELAY' && task) {
+      setLoadingOutstandingRequests(true);
+      try {
+        const all = await technicianService.getMyOutstandingMaterialRequests();
+        setOutstandingRequests(all.filter(r => r.taskId === task.id));
+      } catch {
+        setOutstandingRequests([]);
+      } finally {
+        setLoadingOutstandingRequests(false);
+      }
+    }
+  };
+
+  const submitReject = () => {
+    if (!task) return;
+    if (!rejectModal.category) {
+      Alert.alert('Category Required', 'Please select why this job is being rejected.');
+      return;
+    }
+    if (
+      rejectModal.category === 'ISSUE_MISMATCH' &&
+      !rejectModal.observedIssueType
+    ) {
+      Alert.alert(
+        'Issue Type Required',
+        'Please select the issue type you actually observed on-site.',
+      );
+      return;
+    }
+    if (!rejectModal.reason.trim()) {
+      Alert.alert('Reason Required', 'Please enter a reason to continue.');
+      return;
+    }
+    dispatch(
+      updateTaskStatus({
+        id: task.id,
+        status: 'REJECTED',
+        reason: rejectModal.reason.trim(),
+        rejectionCategory: rejectModal.category,
+        ...(rejectModal.observedIssueType
+          ? {observedIssueType: rejectModal.observedIssueType}
+          : {}),
+        ...(rejectModal.linkedMaterialRequestId != null
+          ? {linkedMaterialRequestId: rejectModal.linkedMaterialRequestId}
+          : {}),
+      }),
+    )
+      .unwrap()
+      .then(() => navigation.goBack())
+      .catch((err: any) =>
+        Alert.alert('Reject Failed', typeof err === 'string' ? err : 'Please try again.'),
+      );
+    setRejectModal(m => ({...m, visible: false}));
+  };
+
   if (!task) {
     return (
       <View style={styles.loadingContainer}>
@@ -317,61 +417,85 @@ const TechnicianTaskDetailScreen = () => {
     );
   }
 
+  // Mirrors HomeScreen's own rule (renderJobActions): Reject is offered on
+  // every non-terminal, non-rejected status, not just the initial one — a
+  // technician can back out mid-job, not only before accepting it.
+  const rejectAction = task.status !== 'completed' && task.status !== 'rejected' && (
+    <TouchableOpacity
+      style={[styles.actionButton, styles.rejectButton]}
+      onPress={openRejectModal}
+      disabled={isUpdating}>
+      <Text style={styles.rejectButtonText}>❌ Reject</Text>
+    </TouchableOpacity>
+  );
+
   const getStatusActions = () => {
     switch (task.status) {
       case 'assigned':
         return (
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              {backgroundColor: colors.success},
-            ]}
-            onPress={() => handleUpdateStatus('accepted')}
-            disabled={isUpdating}>
-            {isUpdating ? (
-              <ActivityIndicator color={colors.white} />
-            ) : (
-              <Text style={styles.actionButtonText}>
-                ✅ Accept Job
-              </Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.inProgressActions}>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                styles.acceptButton,
+                {backgroundColor: colors.success},
+              ]}
+              onPress={() => handleUpdateStatus('accepted')}
+              disabled={isUpdating}>
+              {isUpdating ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.actionButtonText}>
+                  ✅ Accept Job
+                </Text>
+              )}
+            </TouchableOpacity>
+            {rejectAction}
+          </View>
         );
       case 'accepted':
         return (
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              {backgroundColor: colors.warning},
-            ]}
-            onPress={() => handleUpdateStatus('travelling')}
-            disabled={isUpdating}>
-            {isUpdating ? (
-              <ActivityIndicator color={colors.white} />
-            ) : (
-              <Text style={styles.actionButtonText}>
-                🚗 Start Travelling
-              </Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.inProgressActions}>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                styles.acceptButton,
+                {backgroundColor: colors.warning},
+              ]}
+              onPress={() => handleUpdateStatus('travelling')}
+              disabled={isUpdating}>
+              {isUpdating ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.actionButtonText}>
+                  🚗 Start Travelling
+                </Text>
+              )}
+            </TouchableOpacity>
+            {rejectAction}
+          </View>
         );
       case 'travelling':
         return (
-          <TouchableOpacity
-            style={[
-              styles.actionButton,
-              {backgroundColor: colors.primary},
-            ]}
-            onPress={() => handleUpdateStatus('in_progress')}
-            disabled={isUpdating}>
-            {isUpdating ? (
-              <ActivityIndicator color={colors.white} />
-            ) : (
-              <Text style={styles.actionButtonText}>
-                🔧 Start Work
-              </Text>
-            )}
-          </TouchableOpacity>
+          <View style={styles.inProgressActions}>
+            <TouchableOpacity
+              style={[
+                styles.actionButton,
+                styles.acceptButton,
+                {backgroundColor: colors.primary},
+              ]}
+              onPress={() => handleUpdateStatus('in_progress')}
+              disabled={isUpdating}>
+              {isUpdating ? (
+                <ActivityIndicator color={colors.white} />
+              ) : (
+                <Text style={styles.actionButtonText}>
+                  🔧 Start Work
+                </Text>
+              )}
+            </TouchableOpacity>
+            {rejectAction}
+          </View>
         );
       case 'in_progress':
         return (
@@ -399,6 +523,7 @@ const TechnicianTaskDetailScreen = () => {
                 </Text>
               )}
             </TouchableOpacity>
+            {rejectAction}
           </View>
         );
       case 'completed':
@@ -520,6 +645,12 @@ const TechnicianTaskDetailScreen = () => {
               {task.estimatedDuration} hours
             </Text>
           </View>
+          {task.description ? (
+            <View style={styles.descriptionBlock}>
+              <Text style={styles.infoLabel}>What the customer reported</Text>
+              <Text style={styles.descriptionText}>{task.description}</Text>
+            </View>
+          ) : null}
         </View>
 
         {/* Location & Map */}
@@ -801,6 +932,148 @@ const TechnicianTaskDetailScreen = () => {
           </Text>
         </TouchableOpacity>
       </View>
+
+      {/* Reject Modal — SRS 5.3.1.2 categorization, same shape as HomeScreen's */}
+      <Modal
+        visible={rejectModal.visible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setRejectModal(m => ({...m, visible: false}))}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Reject Job</Text>
+            <Text style={styles.modalSubtitle}>
+              This job will be returned to your team lead with your reason.
+            </Text>
+
+            <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+              <Text style={styles.modalSectionLabel}>Why is this being rejected?</Text>
+              <View style={styles.categoryRow}>
+                {REJECTION_CATEGORIES.map(c => (
+                  <TouchableOpacity
+                    key={c.value}
+                    style={[
+                      styles.categoryChip,
+                      rejectModal.category === c.value && styles.categoryChipSelected,
+                    ]}
+                    onPress={() => selectRejectionCategory(c.value)}>
+                    <Text style={styles.categoryChipIcon}>{c.icon}</Text>
+                    <Text
+                      style={[
+                        styles.categoryChipText,
+                        rejectModal.category === c.value && styles.categoryChipTextSelected,
+                      ]}>
+                      {c.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {rejectModal.category === 'ISSUE_MISMATCH' && (
+                <>
+                  <Text style={styles.modalSectionLabel}>Observed issue type</Text>
+                  <View style={styles.categoryRow}>
+                    {OBSERVED_ISSUE_TYPES.map(t => (
+                      <TouchableOpacity
+                        key={t.value}
+                        style={[
+                          styles.categoryChip,
+                          rejectModal.observedIssueType === t.value &&
+                            styles.categoryChipSelected,
+                        ]}
+                        onPress={() =>
+                          setRejectModal(m => ({...m, observedIssueType: t.value}))
+                        }>
+                        <Text style={styles.categoryChipIcon}>{t.icon}</Text>
+                        <Text
+                          style={[
+                            styles.categoryChipText,
+                            rejectModal.observedIssueType === t.value &&
+                              styles.categoryChipTextSelected,
+                          ]}>
+                          {t.label}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              )}
+
+              {rejectModal.category === 'MATERIAL_DELAY' && (
+                <>
+                  <Text style={styles.modalSectionLabel}>Linked material request</Text>
+                  {loadingOutstandingRequests ? (
+                    <ActivityIndicator color={colors.primary} style={{marginVertical: spacing.sm}} />
+                  ) : outstandingRequests.length === 0 ? (
+                    <Text style={styles.noRequestsText}>
+                      No outstanding material request found under your account for this job.
+                      If your team lead submitted one on your behalf, describe it in the notes
+                      below — you can still reject without a linked reference.
+                    </Text>
+                  ) : (
+                    outstandingRequests.map(r => (
+                      <TouchableOpacity
+                        key={r.id}
+                        style={[
+                          styles.requestRow,
+                          rejectModal.linkedMaterialRequestId === r.id &&
+                            styles.requestRowSelected,
+                        ]}
+                        onPress={() =>
+                          setRejectModal(m => ({...m, linkedMaterialRequestId: r.id}))
+                        }>
+                        <View
+                          style={[
+                            styles.radio,
+                            rejectModal.linkedMaterialRequestId === r.id && styles.radioSelected,
+                          ]}>
+                          {rejectModal.linkedMaterialRequestId === r.id && (
+                            <View style={styles.radioDot} />
+                          )}
+                        </View>
+                        <View style={{flex: 1}}>
+                          <Text style={styles.requestNumber}>{r.requestNumber}</Text>
+                          <Text style={styles.requestMeta}>
+                            {r.status} · {r.totalItems} item{r.totalItems === 1 ? '' : 's'}
+                            {r.submittedTimeAgo ? ` · ${r.submittedTimeAgo}` : ''}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))
+                  )}
+                </>
+              )}
+
+              {rejectModal.category && (
+                <Text style={styles.modalSectionLabel}>Details</Text>
+              )}
+
+              <TextInput
+                style={styles.reasonInput}
+                placeholder="Enter reason..."
+                placeholderTextColor={colors.textLight}
+                multiline
+                numberOfLines={4}
+                value={rejectModal.reason}
+                onChangeText={t => setRejectModal(m => ({...m, reason: t}))}
+              />
+            </ScrollView>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => setRejectModal(m => ({...m, visible: false}))}>
+                <Text style={styles.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalConfirmButton} onPress={submitReject}>
+                <Text style={styles.modalConfirmText}>❌ Confirm Reject</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </ScrollView>
   );
 };
@@ -968,6 +1241,15 @@ const styles = StyleSheet.create({
     fontSize: typography.sm,
     color: colors.textPrimary,
   },
+  descriptionBlock: {
+    paddingTop: spacing.sm,
+  },
+  descriptionText: {
+    fontSize: typography.sm,
+    color: colors.textPrimary,
+    lineHeight: typography.lineHeightMd,
+    marginTop: spacing.xs,
+  },
   addressText: {
     fontSize: typography.md,
     color: colors.textSecondary,
@@ -1008,6 +1290,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.md,
   },
+  acceptButton: {
+    flex: 2,
+  },
   pauseButton: {
     flex: 1,
     backgroundColor: colors.white,
@@ -1022,6 +1307,171 @@ const styles = StyleSheet.create({
   completeButton: {
     flex: 2,
     backgroundColor: colors.success,
+  },
+  rejectButton: {
+    flex: 1,
+    backgroundColor: colors.error,
+  },
+  rejectButtonText: {
+    color: colors.white,
+    fontSize: typography.md,
+    fontWeight: typography.bold,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalCard: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: spacing.lg,
+    paddingBottom: spacing.xxl,
+  },
+  modalTitle: {
+    fontSize: typography.xl,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  modalSubtitle: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+  },
+  modalScroll: {
+    maxHeight: 420,
+  },
+  modalSectionLabel: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  categoryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  categoryChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+  },
+  categoryChipSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '15',
+  },
+  categoryChipIcon: {
+    fontSize: 16,
+  },
+  categoryChipText: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    fontWeight: typography.medium,
+  },
+  categoryChipTextSelected: {
+    color: colors.primary,
+    fontWeight: typography.bold,
+  },
+  noRequestsText: {
+    fontSize: typography.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
+    marginBottom: spacing.md,
+  },
+  requestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.background,
+    marginBottom: spacing.xs,
+  },
+  requestRowSelected: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '10',
+  },
+  radio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  radioSelected: {
+    borderColor: colors.primary,
+  },
+  radioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.primary,
+  },
+  requestNumber: {
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+    color: colors.textPrimary,
+  },
+  requestMeta: {
+    fontSize: typography.xs,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  reasonInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: spacing.md,
+    fontSize: typography.md,
+    color: colors.textPrimary,
+    minHeight: 100,
+    textAlignVertical: 'top',
+    marginBottom: spacing.md,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  modalCancelButton: {
+    flex: 1,
+    paddingVertical: spacing.md,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modalCancelText: {
+    color: colors.textSecondary,
+    fontSize: typography.md,
+    fontWeight: typography.medium,
+  },
+  modalConfirmButton: {
+    flex: 2,
+    paddingVertical: spacing.md,
+    borderRadius: 8,
+    alignItems: 'center',
+    backgroundColor: colors.error,
+  },
+  modalConfirmText: {
+    color: colors.white,
+    fontSize: typography.md,
+    fontWeight: typography.bold,
   },
   completedBanner: {
     backgroundColor: colors.success + '15',

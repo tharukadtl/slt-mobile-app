@@ -137,6 +137,16 @@ const fill = async (input: any, text: string) => {
   });
 };
 
+// ATT-008 — handleEODCheckOut now gates on an ending-odometer reading before
+// it ever raises either the plain confirm or the handover modal.
+const fillOdometer = async (tree: any, value: string) => {
+  const input = tree.root
+    .findAllByType(TextInput)
+    .find((i: any) => /odometer/i.test(String(i.props.placeholder ?? '')));
+  expect(input).toBeDefined();
+  await fill(input, value);
+};
+
 const render = (tasks: any[]) => {
   mockState.technician.tasks = tasks;
   let tree: any;
@@ -161,6 +171,7 @@ describe('HomeScreen EOD handover — SRS 5.3.1.4 mandatory per-job reason', () 
 
   test('mandatoryPerJobReason', async () => {
     const tree = render([JOB_1, JOB_2]);
+    await fillOdometer(tree, '45180');
 
     // ── Step 1: tap EOD Check-Out with two jobs still open ──────────────────────────────
     await tap(tree, 'Checkout');
@@ -231,6 +242,7 @@ describe('HomeScreen EOD handover — SRS 5.3.1.4 mandatory per-job reason', () 
    */
   test('no open jobs: check-out does not raise the handover modal', async () => {
     const tree = render([{...JOB_1, status: 'completed'}]);
+    await fillOdometer(tree, '45180');
 
     await tap(tree, 'Checkout');
 

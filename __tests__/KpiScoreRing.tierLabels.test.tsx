@@ -1,29 +1,18 @@
 /**
- * KPI-007 (06_KPI_PERFORMANCE, FR-16) — logged as "genuinely never-written, no substitute exists
- * anywhere" in the 2026-09-02 completeness recount. Investigated before writing, and unlike the
- * other 7 rows in that batch, this ONE IS a real, still-open product gap, not a missing-test
- * situation:
+ * KPI-007 (06_KPI_PERFORMANCE, FR-16) — was logged as "genuinely never-written, no substitute
+ * exists anywhere" in the 2026-09-02 completeness recount; a real, previously-open product gap,
+ * not a missing-test situation. Resolved 2026-09-05: `KpiScoreRing` now exists at
+ * `@components/common/KpiScoreRing` and is wired into `technician/KPITargetsScreen.tsx`'s
+ * `scoreCircle`, which previously just showed `{kpi.completionRate}%` with a static "Score" label.
  *
- *   - No `KpiScoreRing` component, nor any component with this name, exists anywhere in the
- *     project — confirmed by an exhaustive filename search across `SLTMobileApp/src`.
- *   - No tier-classification logic (EXCELLENT / GOOD / NEEDS WORK, or any equivalent labeling of a
- *     score into a qualitative band) exists anywhere in the KPI screens either — confirmed by
- *     reading both real score displays directly:
- *       - `technician/KPITargetsScreen.tsx` (:324-337) has a `scoreCircle` showing
- *         `{kpi.completionRate}%` with a static, unconditional "Score" label underneath — no
- *         branching on the value at all.
- *       - `teamlead/KPIPerformanceScreen.tsx` uses a card grid instead of a ring, and its own
- *         completion-rate card only branches into two states ("On Target" / "Needs Improvement" at
- *         >=85%), not the three tiers (EXCELLENT/GOOD/NEEDS WORK) this row specifies, and isn't a
- *         reusable ring component either.
+ * Tier bands are EXCELLENT/GOOD/AVERAGE/BELOW_AVERAGE/NEEDS_IMPROVEMENT — matching
+ * `KpiCalculationService`'s real bands (fieldops), confirmed live against the backend — not the
+ * 3-tier EXCELLENT/GOOD/NEEDS WORK system originally proposed by the test sheet, whose "55 ->
+ * NEEDS WORK" example was itself wrong (55 is BELOW_AVERAGE).
  *
- * Logged as a new open finding in QA_Compliance_Consolidated_Report.md rather than built here, per
- * this project's standing convention: this test file writes NO production code. It resolves the
- * component dynamically (a static import of a module that doesn't exist would fail at transform
- * time — a test that never runs, not a test that fails) so it EXECUTES and returns a real, today's-
- * date verdict naming exactly what's missing, mirroring the established pattern in
- * `offlineQueue.test.ts`. It deliberately does not assert the absence of the feature, which would
- * lock the gap in as correct behaviour — it will pass unchanged once a real KpiScoreRing ships.
+ * Still resolves the component dynamically (an import that fails at transform time would be a
+ * test that never runs, not a test that fails) so this keeps working the same way if the module
+ * path ever moves, mirroring the established pattern in `offlineQueue.test.ts`.
  */
 import React from 'react';
 
@@ -87,7 +76,11 @@ describe('KPI-007 — KPI ring component renders tiered score labels', () => {
 
       rendersLabel(82, 'GOOD');
       rendersLabel(95, 'EXCELLENT');
-      rendersLabel(55, 'NEEDS WORK');
+      // 55 is BELOW_AVERAGE per KpiCalculationService's real bands (EXCELLENT
+      // >=90, GOOD >=75, AVERAGE >=60, BELOW_AVERAGE >=40, NEEDS_IMPROVEMENT
+      // below), confirmed live against the backend — not the bottom tier the
+      // sheet originally proposed.
+      rendersLabel(55, 'BELOW AVG');
 
       // score=0 must not crash.
       try {

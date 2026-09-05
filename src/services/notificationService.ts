@@ -12,14 +12,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {Alert} from 'react-native';
 import api from './api';
 
+// Matches the FCM data payload NotificationService.sendPush (fieldops) now sends —
+// the real Notification.NotificationType enum values (FAULT_REPORTED, FAULT_ASSIGNED,
+// PAYMENT_APPROVED, ... 20+ values), plus the small, stable referenceType/referenceId
+// pair routing actually keys on. FCM data payloads are always string-valued.
 export interface NotificationData {
-  type:
-    | 'STATUS_UPDATE'
-    | 'TECHNICIAN_ASSIGNED'
-    | 'JOB_COMPLETED'
-    | 'BILLING';
-  issueId?: string;
-  billId?: string;
+  type?: string;
+  referenceId?: string;
+  referenceType?: string;
   title: string;
   body: string;
 }

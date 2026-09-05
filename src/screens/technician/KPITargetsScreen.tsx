@@ -16,6 +16,7 @@ import {useAppDispatch, useAppSelector} from '@store/hooks';
 import {fetchTargets} from '@store/slices/technicianSlice';
 import {Target} from '@appTypes/technician.types';
 import {formatCurrency} from '@utils/formatters';
+import KpiScoreRing from '@components/common/KpiScoreRing';
 
 const PERIODS = [
   {label: 'Daily', value: 'DAILY'},
@@ -329,12 +330,7 @@ const TechnicianKPITargetsScreen = () => {
             <Text style={styles.scoreCardPeriod}>
               {selectedPeriod} Summary
             </Text>
-            <View style={styles.scoreCircle}>
-              <Text style={styles.scoreValue}>
-                {kpi.completionRate}%
-              </Text>
-              <Text style={styles.scoreLabel}>Score</Text>
-            </View>
+            <KpiScoreRing score={kpi.completionRate} />
           </View>
           <View style={styles.scoreCardRight}>
             <View style={styles.scoreStatRow}>
@@ -807,26 +803,6 @@ const styles = StyleSheet.create({
     color: colors.white,
     opacity: 0.6,
     marginBottom: spacing.md,
-  },
-  scoreCircle: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: colors.white + '20',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 3,
-    borderColor: colors.white + '40',
-  },
-  scoreValue: {
-    fontSize: typography.xxl,
-    fontWeight: typography.bold,
-    color: colors.white,
-  },
-  scoreLabel: {
-    fontSize: typography.xs,
-    color: colors.white,
-    opacity: 0.8,
   },
   scoreCardRight: {
     flex: 1,

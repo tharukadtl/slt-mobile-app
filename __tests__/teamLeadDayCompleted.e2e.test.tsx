@@ -43,6 +43,10 @@ const mockState: any = {
     teamMembers: [] as any[],
     teamStats: null,
     hasBODToday: true,
+    // The fix: checkTodaysSession.fulfilled now keeps the session's real
+    // status instead of discarding it, so the screen can tell this apart
+    // from "BOD done, day still running" (ACTIVE).
+    todaySessionStatus: 'CLOSED',
     isLoading: false,
     error: null,
   },

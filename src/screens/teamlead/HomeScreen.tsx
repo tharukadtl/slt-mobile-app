@@ -111,8 +111,12 @@ const TeamLeadHomeScreen = () => {
     teamMembers,
     teamStats,
     hasBODToday,
+    todaySessionStatus,
     isLoading,
   } = useAppSelector(state => state.technician);
+  // ATT-017 — hasBODToday alone stays true after EOD too (it's what stops a
+  // second BOD), so it can't tell "day running" from "day over" on its own.
+  const isDayCompleted = hasBODToday && todaySessionStatus === 'CLOSED';
 
   const [activeTab, setActiveTab] = useState(0);
   // Material-delay rejections carry a linkedMaterialRequestId; the request's
@@ -645,7 +649,18 @@ const TeamLeadHomeScreen = () => {
             <Text style={styles.mapButtonText}>🗺️ Map</Text>
           </TouchableOpacity>
           {/* BOD / EOD / Assign Buttons */}
-          {hasBODToday ? (
+          {isDayCompleted ? (
+            <>
+              <TouchableOpacity
+                style={styles.requestsButton}
+                onPress={() => navigation.navigate('TeamMaterialRequests')}>
+                <Text style={styles.bodButtonText}>📦 Requests</Text>
+              </TouchableOpacity>
+              <View style={styles.dayCompletedBadge}>
+                <Text style={styles.dayCompletedBadgeText}>✅ Day Completed</Text>
+              </View>
+            </>
+          ) : hasBODToday ? (
             <>
               <TouchableOpacity
                 style={styles.assignButton}
@@ -672,6 +687,14 @@ const TeamLeadHomeScreen = () => {
           )}
         </View>
       </View>
+
+      {isDayCompleted && (
+        <View style={styles.dayCompletedBanner}>
+          <Text style={styles.dayCompletedBannerText}>
+            BOD/EOD already done for today
+          </Text>
+        </View>
+      )}
 
       <ScrollView
         style={styles.scrollView}
@@ -955,6 +978,29 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: typography.sm,
     fontWeight: typography.bold,
+  },
+  dayCompletedBadge: {
+    backgroundColor: colors.success + '30',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: 8,
+  },
+  dayCompletedBadgeText: {
+    color: colors.success,
+    fontSize: typography.sm,
+    fontWeight: typography.bold,
+  },
+  dayCompletedBanner: {
+    backgroundColor: colors.success + '15',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.success + '40',
+  },
+  dayCompletedBannerText: {
+    color: colors.success,
+    fontSize: typography.xs,
+    textAlign: 'center',
   },
   scrollView: {
     flex: 1,
