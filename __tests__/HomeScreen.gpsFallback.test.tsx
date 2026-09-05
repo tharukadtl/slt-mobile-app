@@ -211,7 +211,12 @@ describe('HomeScreen BOD check-in — GPS-unavailable fallback (Critical #28)', 
     );
 
     act(() => tree.unmount());
-  });
+    // This is the first test in the file, so it eats the cold-start cost of
+    // transforming/mounting HomeScreen's full component graph — verified
+    // locally to take ~17s cold vs ~5s warm, comfortably over Jest's 5000ms
+    // default on a shared CI runner even though later tests in this same
+    // file pass within it.
+  }, 20000);
 
   test('rejected check-in shows a real failure, never "✅ Checked In"', async () => {
     unwrapResult = () => Promise.reject('No active shift for today');

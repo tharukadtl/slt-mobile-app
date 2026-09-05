@@ -135,6 +135,7 @@ const advanceToStep4AndSubmit = async (tree: any) => {
 describe('PaymentSubmissionScreen — FR-9 payment submission guard', () => {
   let alertSpy: jest.SpyInstance;
   let alerts: Array<{title: any; msg: any}>;
+  let currentTree: any;
 
   beforeEach(() => {
     getMock.mockReset();
@@ -156,13 +157,21 @@ describe('PaymentSubmissionScreen — FR-9 payment submission guard', () => {
       });
   });
 
-  afterEach(() => alertSpy.mockRestore());
+  afterEach(() => {
+    alertSpy.mockRestore();
+    // Without this, TouchableOpacity's own internal Animated engine keeps
+    // ticking on a real timer against a tree React still considers mounted,
+    // and later crashes into torn-down module internals once Jest moves on.
+    if (currentTree) act(() => currentTree.unmount());
+    currentTree = undefined;
+  });
 
   const render = async () => {
     let tree: any;
     await act(async () => {
       tree = renderer.create(<PaymentSubmissionScreen />);
     });
+    currentTree = tree;
     return tree;
   };
 

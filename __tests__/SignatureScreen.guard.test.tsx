@@ -113,6 +113,7 @@ const pressButtonWithText = async (root: any, label: string) => {
 
 describe('SignatureScreen — FR-9 completion guard', () => {
   let alertSpy: jest.SpyInstance;
+  let currentTree: any;
 
   beforeEach(() => {
     submitSignatureMock.mockClear();
@@ -123,13 +124,21 @@ describe('SignatureScreen — FR-9 completion guard', () => {
     alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
   });
 
-  afterEach(() => alertSpy.mockRestore());
+  afterEach(() => {
+    alertSpy.mockRestore();
+    // Without this, TouchableOpacity's own internal Animated engine keeps
+    // ticking on a real timer against a tree React still considers mounted,
+    // and later crashes into torn-down module internals once Jest moves on.
+    if (currentTree) act(() => currentTree.unmount());
+    currentTree = undefined;
+  });
 
   const render = () => {
     let tree: any;
     act(() => {
       tree = renderer.create(<SignatureScreen />);
     });
+    currentTree = tree;
     return tree;
   };
 

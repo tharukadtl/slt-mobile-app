@@ -286,7 +286,16 @@ describe('PAY-009 — Team Lead 4-step payment wizard, happy path', () => {
     expect(msg).toContain(String(MOCK_PAYMENT_RESPONSE.id));
     expect(msg).toContain(MOCK_PAYMENT_RESPONSE.paymentNumber);
     expect(msg).toContain(MOCK_PAYMENT_RESPONSE.status);
-  });
+
+    // Without this, TouchableOpacity/Switch's own internal Animated engine
+    // (owned by react-native, not this screen) keeps ticking on a real timer
+    // against a tree React still considers mounted, and later crashes into
+    // torn-down module internals once Jest moves past this file.
+    act(() => tree.unmount());
+    // Real Step1-4 components across a full wizard walkthrough — verified
+    // locally to take ~17s cold vs ~5s warm, well over Jest's 5000ms default
+    // on a shared CI runner.
+  }, 20000);
 });
 
 /**
