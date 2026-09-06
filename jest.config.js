@@ -6,7 +6,15 @@ module.exports = {
   // too and fails with "ReferenceError: device is not defined", since none of
   // Detox's globals exist under this config. Confirmed by actually hitting that
   // failure in a clean run, not assumed (2026-09-03).
-  testPathIgnorePatterns: ['<rootDir>/node_modules/', '<rootDir>/e2e/'],
+  // __tests__/live/ holds live-backend integration tests (real Axios calls, no @services
+  // mocking) that need a genuine running fieldops instance at API_BASE_URL -- there is none in
+  // the normal `npm test` run, so these are excluded here the same way e2e/ is, and are run
+  // explicitly instead by .github/workflows/live-backend.yml, which overrides this array.
+  testPathIgnorePatterns: [
+    '<rootDir>/node_modules/',
+    '<rootDir>/e2e/',
+    '<rootDir>/__tests__/live/',
+  ],
   // Allow Jest to transform the Redux ecosystem, which ships ESM builds
   // (@reduxjs/toolkit → immer/redux/reselect, plus react-redux). The stock
   // react-native preset ignores all of node_modules except RN packages, which

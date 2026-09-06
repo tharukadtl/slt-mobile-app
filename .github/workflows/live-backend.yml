@@ -1,0 +1,148 @@
+name: Live backend (mobile)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  login-live:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SLTMobileApp
+        uses: actions/checkout@v4
+        with:
+          path: mobile
+
+      - name: Checkout fieldops
+        uses: actions/checkout@v4
+        with:
+          repository: tharukadtl/slt-backend
+          path: fieldops
+
+      # fieldops's own mvnw is committed with the executable bit set (git ls-files -s mvnw ->
+      # 100755, confirmed on origin/master), so this checkout should already preserve it -- but
+      # making it explicit here means this workflow doesn't depend on that other repo's file
+      # permissions being perfectly preserved through git forever. Harmless no-op if already +x.
+      # Learned the hard way in frontend-admin/e2e-live.yml tonight (mvnw exit 126 before this
+      # fix existed) -- applied here from the start instead of rediscovering it.
+      - name: Ensure fieldops's mvnw is executable
+        run: chmod +x fieldops/mvnw
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: 'mobile/.nvmrc'
+
+      - name: Install SLTMobileApp dependencies
+        working-directory: mobile
+        run: npm ci
+
+      # Reuses fieldops's own proven Testcontainers wiring (src/test/resources/application.yml)
+      # via Spring Boot's documented useTestClasspath run mode, exactly as frontend-admin/
+      # e2e-live.yml does. --spring.config.location forces the test config to take precedence
+      # over src/main/resources/application.yml (useTestClasspath alone does not do this,
+      # confirmed empirically there). app.rate-limit.max-requests-per-minute is raised CI-only,
+      # for the same reason established there: every live spec authenticates as the same single
+      # seeded account, and the real 100/min limiter (RateLimitService.java) trips on that
+      # traffic pattern. Does not touch the production default.
+      - name: Start fieldops (Testcontainers-backed run mode)
+        working-directory: fieldops
+        run: |
+          nohup ./mvnw spring-boot:run \
+            -Dspring-boot.run.useTestClasspath=true \
+            "-Dspring-boot.run.arguments=--spring.config.location=file:src/test/resources/application.yml --app.rate-limit.max-requests-per-minute=100000" \
+            > fieldops-run.log 2>&1 &
+          echo $! > fieldops.pid
+
+      - name: Wait for fieldops to be healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
+              echo "fieldops is UP"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "fieldops never became healthy -- log follows:"
+          cat fieldops/fieldops-run.log
+          exit 1
+
+      # Testcontainers logs its own resolved connection URL during startup, same technique
+      # frontend-admin/e2e-live.yml already uses on this same log file.
+      - name: Discover the Testcontainers MySQL port
+        id: db
+        run: |
+          PORT=$(grep -o 'jdbc:mysql://localhost:[0-9]*' fieldops/fieldops-run.log | head -1 | grep -o '[0-9]*$')
+          if [ -z "$PORT" ]; then
+            echo "Could not find the Testcontainers MySQL port in fieldops-run.log"
+            exit 1
+          fi
+          echo "port=$PORT" >> "$GITHUB_OUTPUT"
+
+      # scripts/live/seed_admin.py is a vendored copy of frontend-admin/cypress/support/
+      # seed_live_fixtures.py's cmd_seed_admin() -- not a cross-repo checkout, since
+      # frontend-admin is private and this workflow's default GITHUB_TOKEN can't read it (see
+      # the checkout step comments above). Its only non-stdlib import is pymysql -- confirmed by
+      # reading it directly. Applied the pip-install-step lesson from frontend-admin/e2e-live.yml
+      # from the start here, instead of rediscovering the missing step tonight's way.
+      - name: Install seed_admin.py dependencies
+        working-directory: mobile
+        run: pip install -r scripts/live/requirements.txt
+
+      # Once per CI session, before the live spec. Idempotent regardless. FIELDOPS_DB_NAME=test,
+      # not slt_fieldops_db, matching the FIELDOPS_DB_NAME rationale established in frontend-admin/
+      # e2e-live.yml: confirmed empirically that Testcontainers' MySQLContainer always provisions
+      # its own default "test" database, regardless of the JDBC URL path.
+      - name: Seed the bootstrap SUPER_ADMIN account
+        working-directory: mobile
+        env:
+          FIELDOPS_DB_HOST: localhost
+          FIELDOPS_DB_PORT: ${{ steps.db.outputs.port }}
+          FIELDOPS_DB_NAME: test
+          FIELDOPS_DB_USER: test
+          FIELDOPS_DB_PASSWORD: test
+        run: python3 scripts/live/seed_admin.py
+
+      # --testPathIgnorePatterns overrides (not merges with) mobile/jest.config.js's own array,
+      # which otherwise excludes __tests__/live/ from every normal run -- this is the one place
+      # that exclusion is deliberately lifted. node_modules/ and e2e/ (Detox's own separate test
+      # tree, no live backend involved) stay excluded.
+      - name: Run live login spec against the real fieldops instance
+        working-directory: mobile
+        env:
+          API_BASE_URL: http://localhost:8080
+          FIELDOPS_LOG_PATH: ${{ github.workspace }}/fieldops/fieldops-run.log
+        run: |
+          npx jest --config jest.config.js \
+            --testPathIgnorePatterns '/node_modules/' \
+            --testPathIgnorePatterns '<rootDir>/e2e/' \
+            --ci \
+            -- __tests__/live/login.live.test.tsx
+
+      # jest-junit (configured in jest.config.js, applies regardless of which test path pattern
+      # is passed) writes reports/jest-junit.xml. if: always() so a summary appears on failure
+      # too -- that's when it matters most, same as every other repo's Test summary step.
+      - name: Test summary
+        if: always()
+        working-directory: mobile
+        run: python3 .github/scripts/summarize_junit.py "reports/jest-junit.xml"
+
+      # kill -TERM gives Ryuk's own reaper the fastest possible detection path -- confirmed
+      # empirically in frontend-admin/e2e-live.yml that this holds even on an abrupt kill -9,
+      # so no graceful-shutdown wait is needed here either. Runs on every outcome.
+      - name: Stop fieldops
+        if: always()
+        run: |
+          [ -f fieldops/fieldops.pid ] && kill "$(cat fieldops/fieldops.pid)" 2>/dev/null || true
+
+      - name: Upload fieldops log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fieldops-run-log
+          path: fieldops/fieldops-run.log
+          if-no-files-found: ignore
