@@ -6,9 +6,11 @@
 // already uses on this same log file, there to discover the Testcontainers MySQL port), a real
 // POST /api/auth/otp/verify, and a real JWT landing in the real Redux store.
 //
-// Only @react-navigation is mocked here, matching every other test in this suite -- LoginScreen
-// and OTPVerifyScreen's success paths are driven entirely by real Redux state, not by navigation,
-// so proving real screen-to-screen transitions is a separate concern from what this file proves.
+// Only @react-navigation is mocked here, matching every other test in this suite -- LoginScreen's
+// success path is driven entirely by real Redux state, not by navigation, so proving real
+// screen-to-screen transitions is a separate concern from what this file proves. The OTP-verify
+// step dispatches the real authSlice thunk directly rather than driving it through
+// OTPVerifyScreen's UI (see the comment at that call site for why).
 //
 // Excluded from the normal `npm test` run via jest.config.js's testPathIgnorePatterns (there is
 // no live backend at API_BASE_URL there) -- only .github/workflows/live-backend.yml runs this,
@@ -19,20 +21,16 @@ import {TextInput, TouchableOpacity, Text} from 'react-native';
 import renderer, {act} from 'react-test-renderer';
 import {Provider} from 'react-redux';
 import {store} from '@store/index';
+import {verifyOTP} from '@store/slices/authSlice';
 
 const mockNavigate = jest.fn();
-// jest.mock() factories may only close over variables prefixed with "mock" (case-insensitive) --
-// enforced by Jest's out-of-scope-variable guard against uninitialized mocks.
-let mockOtpRouteParams = {phoneNumber: ''};
 
 jest.mock('@react-navigation/native', () => ({
   useNavigation: () => ({navigate: mockNavigate, goBack: jest.fn()}),
-  useRoute: () => ({params: mockOtpRouteParams}),
 }));
 jest.mock('@react-navigation/stack', () => ({}));
 
 import LoginScreen from '@screens/auth/LoginScreen';
-import OTPVerifyScreen from '@screens/auth/OTPVerifyScreen';
 
 // The exact phone the CI-seeded SUPER_ADMIN carries -- frontend-admin/cypress/support/
 // seed_live_fixtures.py's seed-admin command, reused as-is. sendOtp requires an existing user
@@ -85,7 +83,6 @@ describe('Live backend: OTP login', () => {
       );
     });
 
-    let otpTree: renderer.ReactTestRenderer | undefined;
     try {
       const phoneInput = loginTree.root.findByType(TextInput);
       act(() => {
@@ -106,24 +103,22 @@ describe('Live backend: OTP login', () => {
       const realOtp = readRealOtpFromLog(TEST_PHONE);
       expect(realOtp).toMatch(/^\d{6}$/);
 
-      // Step 3: real POST /api/auth/otp/verify
-      mockOtpRouteParams = {phoneNumber: TEST_PHONE};
+      // Step 3: real POST /api/auth/otp/verify -- dispatched directly and awaited, rather than
+      // driven through OTPVerifyScreen's onChangeText/auto-submit UI path.
+      //
+      // That UI path (typing each digit, auto-submitting on the 6th) is already exhaustively
+      // covered, screen-to-thunk-to-reducer, by clientLogin.e2e.test.tsx (AUTH-016) against a
+      // mocked backend -- re-driving the same UI mechanics here would be redundant. It was also
+      // the actual bug: OTPVerifyScreen.handleOtpChange (a synchronous onChangeText handler)
+      // calls its own async handleVerify(otpString) without awaiting or returning it, so nothing
+      // in an `act(async () => { otpInputs[i].props.onChangeText(...) })` block was ever waiting
+      // on the dispatched thunk -- the store assertions below ran before verifyOTP.fulfilled had
+      // actually landed, even though the real network call had already genuinely succeeded.
+      // Dispatching the thunk directly removes that fire-and-forget layer entirely: this test's
+      // job is proving the real backend integration (authService <-> fieldops), not re-proving
+      // the OTP input component's own auto-submit behavior.
       await act(async () => {
-        otpTree = renderer.create(
-          <Provider store={store}>
-            <OTPVerifyScreen />
-          </Provider>,
-        );
-      });
-
-      const otpInputs = otpTree!.root.findAllByType(TextInput);
-      expect(otpInputs).toHaveLength(6);
-      // Entering the 6th digit auto-submits (OTPVerifyScreen.handleOtpChange), so no explicit
-      // "Verify OTP" button press is needed here.
-      await act(async () => {
-        for (let i = 0; i < 6; i++) {
-          otpInputs[i].props.onChangeText(realOtp[i]);
-        }
+        await store.dispatch(verifyOTP({phoneNumber: TEST_PHONE, otp: realOtp}));
       });
 
       // Step 4: a real JWT landed in the real store
@@ -131,12 +126,11 @@ describe('Live backend: OTP login', () => {
       expect(store.getState().auth.isAuthenticated).toBe(true);
       expect(store.getState().auth.user?.phone).toBe(TEST_PHONE);
     } finally {
-      // Unmount even on assertion failure -- otherwise LoginScreen/OTPVerifyScreen's Animated
-      // and setInterval timers keep firing after Jest tears the environment down, the same
-      // class of leaked-timer warning already fixed in App.test.tsx.
+      // Unmount even on assertion failure -- otherwise LoginScreen's Animated and setInterval
+      // timers keep firing after Jest tears the environment down, the same class of leaked-timer
+      // warning already fixed in App.test.tsx.
       act(() => {
         loginTree.unmount();
-        otpTree?.unmount();
       });
     }
   }, 30000);
