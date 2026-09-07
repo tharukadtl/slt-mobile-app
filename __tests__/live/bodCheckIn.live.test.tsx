@@ -5,9 +5,17 @@
 // job is proving the real submitBODCheckIn <-> POST /api/attendance/check-in integration, not
 // re-proving the BOD screen's own UI, which is unit-tested elsewhere with a mocked backend.
 //
-// Reuses the CI-seeded SUPER_ADMIN account as-is (POST /api/attendance/check-in permits
-// TECHNICIAN/TEAM_LEAD/ADMIN/SUPER_ADMIN alike, confirmed directly against AttendanceController)
-// -- no new fixtures needed for this flow.
+// Authenticates as the CI-seeded Technician account (scripts/live/seed_admin.py's
+// seed-job-assignment command, phone 0770000002) -- no fixtures of this file's own to add,
+// though it does depend on that command having already run (see live-backend.yml's step order).
+// Deliberately NOT the SUPER_ADMIN account login.live.test.tsx uses: both files dispatch a real
+// POST /api/auth/otp/send for their login, and fieldops enforces a real 60-second OTP-resend
+// cooldown per phone number -- reusing 0770000000 here collided with login.live.test.tsx's own
+// request moments earlier in the same CI job ("Please wait 59 second(s) before requesting
+// another OTP", confirmed directly from a real failed run), a genuine cross-test interaction bug
+// a fully-mocked test could never have surfaced. TECHNICIAN is one of the roles
+// AttendanceController permits for check-in anyway, and is arguably the more realistic caller
+// for this specific action.
 //
 // Excluded from the normal `npm test` run via jest.config.js's testPathIgnorePatterns -- only
 // .github/workflows/live-backend.yml runs this, with API_BASE_URL=http://localhost:8080 and
@@ -29,7 +37,7 @@ interface RealAttendanceResponse {
   userPhone: string;
 }
 
-const TEST_PHONE = '0770000000';
+const TEST_PHONE = '0770000002';
 
 // Real Colombo coordinates -- must fall inside LocationService.validateSriLankaCoords' bounds
 // (lat 5.9-9.9, lng 79.5-81.9) or the backend genuinely rejects the check-in (ATT-003).

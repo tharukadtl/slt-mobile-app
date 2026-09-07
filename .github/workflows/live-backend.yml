@@ -156,7 +156,11 @@ jobs:
             --ci \
             -- __tests__/live/login.live.test.tsx
 
+      # if: runs this step even if the login spec above failed -- each of these three specs is
+      # independently useful evidence, and a failure in one shouldn't silently skip the others
+      # (GitHub Actions' own default) and hide the rest of this run's real results.
       - name: Run BOD check-in live spec against the real fieldops instance
+        if: success() || failure()
         working-directory: mobile
         env:
           API_BASE_URL: http://localhost:8080
@@ -170,6 +174,7 @@ jobs:
             -- __tests__/live/bodCheckIn.live.test.tsx
 
       - name: Run job assignment live spec against the real fieldops instance
+        if: success() || failure()
         working-directory: mobile
         env:
           API_BASE_URL: http://localhost:8080
