@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  login-live:
+  live-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout SLTMobileApp
@@ -105,17 +105,50 @@ jobs:
           FIELDOPS_DB_NAME: test
           FIELDOPS_DB_USER: test
           FIELDOPS_DB_PASSWORD: test
-        run: python3 scripts/live/seed_admin.py
+        run: python3 scripts/live/seed_admin.py seed-admin
+
+      # Team Lead + Technician + Work Group + one unclaimed, Work-Group-queued Fault --
+      # jobAssignment.live.test.tsx's own preconditions. See scripts/live/seed_admin.py's
+      # seed-job-assignment command for exactly why each piece needs seeding versus being
+      # discoverable live. TECHNICIAN_ID is the one value with no live-discovery path before a
+      # real BOD happens (GET /api/team/members only returns *today's* session members), so it's
+      # the one piece captured here and threaded through as an env var below; the Work Group and
+      # Fault ids are rediscovered live by the test itself instead.
+      - name: Seed job-assignment fixtures
+        id: job-assignment-fixtures
+        working-directory: mobile
+        env:
+          FIELDOPS_DB_HOST: localhost
+          FIELDOPS_DB_PORT: ${{ steps.db.outputs.port }}
+          FIELDOPS_DB_NAME: test
+          FIELDOPS_DB_USER: test
+          FIELDOPS_DB_PASSWORD: test
+        run: |
+          python3 scripts/live/seed_admin.py seed-job-assignment | tee /tmp/seed-job-assignment.log
+          TECH_ID=$(grep -o 'TECHNICIAN_ID=[0-9]*' /tmp/seed-job-assignment.log | head -1 | cut -d= -f2)
+          if [ -z "$TECH_ID" ]; then
+            echo "Could not find TECHNICIAN_ID in seed-job-assignment output (fixtures may have already existed from a prior run on a non-fresh DB)"
+            exit 1
+          fi
+          echo "technician_id=$TECH_ID" >> "$GITHUB_OUTPUT"
 
       # --testPathIgnorePatterns overrides (not merges with) mobile/jest.config.js's own array,
       # which otherwise excludes __tests__/live/ from every normal run -- this is the one place
       # that exclusion is deliberately lifted. node_modules/ and e2e/ (Detox's own separate test
-      # tree, no live backend involved) stay excluded.
-      - name: Run live login spec against the real fieldops instance
+      # tree, no live backend involved) stay excluded. Run as three separate steps, not one jest
+      # invocation covering all three spec files, so each flow's pass/fail is independently
+      # visible in the CI log rather than folded into one combined result.
+      # Each step below sets its own JEST_JUNIT_OUTPUT_NAME -- jest-junit (configured in
+      # jest.config.js) otherwise always writes the same reports/jest-junit.xml, which running
+      # jest three times in a row would silently overwrite twice, leaving the Test summary step
+      # below reflecting only the last spec. JEST_JUNIT_OUTPUT_DIR is left at its config default
+      # (reports/), matching every other repo's convention.
+      - name: Run login live spec against the real fieldops instance
         working-directory: mobile
         env:
           API_BASE_URL: http://localhost:8080
           FIELDOPS_LOG_PATH: ${{ github.workspace }}/fieldops/fieldops-run.log
+          JEST_JUNIT_OUTPUT_NAME: login-live-junit.xml
         run: |
           npx jest --config jest.config.js \
             --testPathIgnorePatterns '/node_modules/' \
@@ -123,13 +156,40 @@ jobs:
             --ci \
             -- __tests__/live/login.live.test.tsx
 
-      # jest-junit (configured in jest.config.js, applies regardless of which test path pattern
-      # is passed) writes reports/jest-junit.xml. if: always() so a summary appears on failure
-      # too -- that's when it matters most, same as every other repo's Test summary step.
+      - name: Run BOD check-in live spec against the real fieldops instance
+        working-directory: mobile
+        env:
+          API_BASE_URL: http://localhost:8080
+          FIELDOPS_LOG_PATH: ${{ github.workspace }}/fieldops/fieldops-run.log
+          JEST_JUNIT_OUTPUT_NAME: bod-checkin-live-junit.xml
+        run: |
+          npx jest --config jest.config.js \
+            --testPathIgnorePatterns '/node_modules/' \
+            --testPathIgnorePatterns '<rootDir>/e2e/' \
+            --ci \
+            -- __tests__/live/bodCheckIn.live.test.tsx
+
+      - name: Run job assignment live spec against the real fieldops instance
+        working-directory: mobile
+        env:
+          API_BASE_URL: http://localhost:8080
+          FIELDOPS_LOG_PATH: ${{ github.workspace }}/fieldops/fieldops-run.log
+          SEEDED_TECHNICIAN_ID: ${{ steps.job-assignment-fixtures.outputs.technician_id }}
+          JEST_JUNIT_OUTPUT_NAME: job-assignment-live-junit.xml
+        run: |
+          npx jest --config jest.config.js \
+            --testPathIgnorePatterns '/node_modules/' \
+            --testPathIgnorePatterns '<rootDir>/e2e/' \
+            --ci \
+            -- __tests__/live/jobAssignment.live.test.tsx
+
+      # Each of the three spec steps above writes its own reports/*-live-junit.xml (see their
+      # JEST_JUNIT_OUTPUT_NAME overrides). if: always() so a summary appears on failure too --
+      # that's when it matters most, same as every other repo's Test summary step.
       - name: Test summary
         if: always()
         working-directory: mobile
-        run: python3 .github/scripts/summarize_junit.py "reports/jest-junit.xml"
+        run: python3 .github/scripts/summarize_junit.py "reports/*-live-junit.xml"
 
       # kill -TERM gives Ryuk's own reaper the fastest possible detection path -- confirmed
       # empirically in frontend-admin/e2e-live.yml that this holds even on an abrupt kill -9,

@@ -1,6 +1,11 @@
 # jest-junit output (generated per CI run, read by the summary step)
 reports/
 
+# Python bytecode cache from scripts/live/*.py (created locally by e.g. `python3 -m py_compile`
+# during verification; never checked in)
+__pycache__/
+*.pyc
+
 # OSX
 #
 .DS_Store
