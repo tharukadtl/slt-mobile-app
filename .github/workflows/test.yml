@@ -17,6 +17,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # package.json's own "test" script now carries --coverage (jest --coverage). Detox
+      # (.detoxrc.js) is deliberately NOT run here -- confirmed directly, not assumed: its only
+      # configured devices are an attached physical device and an "emulator" (avdName: Pixel_8),
+      # both requiring a real Android emulator/device booted and reachable via adb, which
+      # ubuntu-latest doesn't provide without a real emulator-boot step (slow, historically
+      # flaky in CI, and no iOS config exists here at all -- .detoxrc.js's own comment says
+      # that's a hard platform constraint, this being a Windows dev machine). live-backend.yml's
+      # Jest specs under __tests__/live/ -- real, unmocked network calls against a genuine
+      # running fieldops instance -- remain this pipeline's practical "Mobile Tests" substitute;
+      # that workflow is still in place and still the one exercising real end-to-end behavior.
       - name: Run tests
         run: npm test
 
@@ -25,4 +35,15 @@ jobs:
       # ships python3 by default, no setup step needed.
       - name: Test summary
         if: always()
-        run: python3 .github/scripts/summarize_junit.py "reports/jest-junit.xml"
+        run: python3 .github/scripts/summarize_junit.py "reports/jest-junit.xml" --title "Unit Tests"
+
+      # Jest writes coverage/ regardless of individual test pass/fail (only a config/compile
+      # error would prevent it), so this uploads on every outcome, not just success.
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+          if-no-files-found: ignore

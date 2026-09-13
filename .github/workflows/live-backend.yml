@@ -194,7 +194,7 @@ jobs:
       - name: Test summary
         if: always()
         working-directory: mobile
-        run: python3 .github/scripts/summarize_junit.py "reports/*-live-junit.xml"
+        run: python3 .github/scripts/summarize_junit.py "reports/*-live-junit.xml" --title "Live Backend / Mobile Integration Tests"
 
       # kill -TERM gives Ryuk's own reaper the fastest possible detection path -- confirmed
       # empirically in frontend-admin/e2e-live.yml that this holds even on an abrupt kill -9,
