@@ -294,5 +294,10 @@ describe('JOB-024 — the Signature screen is the only path to COMPLETED', () =>
     expect(completion.completionPhotoUrls).toBe('http://x/uploads/photos/after-1.jpg');
 
     act(() => signature.unmount());
-  });
+    // Three full screens (HomeScreen, TaskDetailScreen, SignatureScreen) mounted and
+    // unmounted sequentially in one test, same shape as the already-fixed cold-start files
+    // (HomeScreen.gpsFallback.test.tsx, submitPayment.e2e.test.tsx) -- comfortably over
+    // Jest's 5000ms default on a shared/loaded runner (confirmed: this test failed with
+    // "Exceeded timeout of 5000 ms" in a real local run, 2026-09-13).
+  }, 20000);
 });

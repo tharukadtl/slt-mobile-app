@@ -221,5 +221,9 @@ describe('AUTH-016 — client OTP login, happy path', () => {
     expect(landingStack(state)).toBe('ClientNavigator');
 
     act(() => otpScreen.unmount());
-  });
+    // Two full screens (login + OTP) mounted sequentially in one test, same shape as the
+    // already-fixed cold-start files (HomeScreen.gpsFallback.test.tsx,
+    // submitPayment.e2e.test.tsx) -- comfortably over Jest's 5000ms default on a
+    // shared/loaded runner.
+  }, 20000);
 });

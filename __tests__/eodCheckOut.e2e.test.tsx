@@ -238,5 +238,8 @@ describe('EOD check-out — job summary and daily mileage (ATT-008)', () => {
     expect(String(success![1])).toContain(`Mileage: ${MOCK_DISTANCE_KM} km`);
 
     act(() => tree.unmount());
-  });
+    // Same shape as the already-fixed cold-start files (HomeScreen.gpsFallback.test.tsx,
+    // submitPayment.e2e.test.tsx) -- a single test paying the file's full cold-start cost,
+    // comfortably over Jest's 5000ms default on a shared/loaded runner.
+  }, 20000);
 });

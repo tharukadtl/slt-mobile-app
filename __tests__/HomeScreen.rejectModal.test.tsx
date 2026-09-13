@@ -211,7 +211,18 @@ describe('HomeScreen reject modal — SRS 5.3.1.2 categorized rejection', () => 
     expect(payload.linkedMaterialRequestId).toBeUndefined();
 
     act(() => tree.unmount());
-  });
+    // This is the first test in the file, so it eats the cold-start cost of
+    // transforming/mounting HomeScreen's full component graph, same shape as the
+    // already-fixed HomeScreen.gpsFallback.test.tsx. Also the working theory for the
+    // "reason is still mandatory once a category is chosen" test further down in this same
+    // file occasionally failing with an unexpected extra updateTaskStatusMock call: an
+    // async callback from THIS test (the reject-modal's confirm handler, or its Animated
+    // engine) still settling after tree.unmount() returns -- unmount() does not itself wait
+    // for pending timers/promises -- and landing after a later test's own mockClear(). This
+    // timeout override gives this test's own async work more room to fully settle before
+    // Jest moves on, the same fix already applied to HomeScreen.gpsFallback.test.tsx and
+    // submitPayment.e2e.test.tsx for the identical cold-start-timing root cause.
+  }, 20000);
 
   // ══════════════════════════════════════════════════════════════════════════
   // JOB-022

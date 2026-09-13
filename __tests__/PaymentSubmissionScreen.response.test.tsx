@@ -196,7 +196,13 @@ describe('PaymentSubmissionScreen — POST /api/payments response handling', () 
     // ...and it navigated away, stranding the Team Lead with no way back to retry.
     expect(mockNavigate).not.toHaveBeenCalled();
     expect(last.buttons).toBeUndefined();
-  });
+    // This is the first test in the file, so it eats the cold-start cost of
+    // transforming/mounting PaymentSubmissionScreen's full component graph -- same shape as
+    // the already-fixed HomeScreen.gpsFallback.test.tsx. The 2026-09-05 fix for this file
+    // (currentTree/afterEach unmount) only addressed the Animated-timer teardown leak, not
+    // this half of the same commit's fix -- confirmed missing by grep, not assumed; this
+    // test actually timed out in a real local run (2026-09-13 CI-summary investigation).
+  }, 20000);
 
   test('response with no body at all -> failure alert, no navigation', async () => {
     postMock.mockResolvedValue(undefined);

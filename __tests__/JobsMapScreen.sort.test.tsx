@@ -278,7 +278,13 @@ describe('JobsMapScreen — distance/priority sort (FR-29 Stage 2b)', () => {
     expect(distanceExpected).not.toEqual(priorityExpected);
 
     act(() => tree.unmount());
-  });
+    // This is the first test in the file, so it eats the cold-start cost of
+    // transforming/mounting JobsMapScreen's full component graph (markers, cards, map) --
+    // same shape as the already-fixed HomeScreen.gpsFallback.test.tsx, comfortably over
+    // Jest's 5000ms default on a shared/loaded runner even though later tests in this same
+    // file pass within it (confirmed: this test failed with "Exceeded timeout of 5000 ms"
+    // in a real local run, 2026-09-13).
+  }, 20000);
 
   // ── Item 2: top-rank highlighting agrees across both surfaces, per mode ───
   test('Item 2 — same task is Top Pick on marker + card, and it changes with the mode', async () => {
