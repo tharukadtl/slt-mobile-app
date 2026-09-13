@@ -199,7 +199,12 @@ describe('JOB-012 — before/after photos then complete', () => {
     });
 
     act(() => tree.unmount());
-  });
+    // This is the first test in the file, so it eats the cold-start cost of
+    // transforming/mounting TaskDetailScreen's full component graph -- same shape as the
+    // already-fixed HomeScreen.gpsFallback.test.tsx, comfortably over Jest's 5000ms default
+    // on a shared/loaded runner even though the later test in this same file passes within
+    // it.
+  }, 20000);
 
   /**
    * The server hard-requires at least one after-photo to complete (JobService.updateJobStatus), so

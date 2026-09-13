@@ -218,5 +218,8 @@ describe('FAULT-006 — client reports a fault, happy path', () => {
     expect(state.issues.issues.map((i: any) => i.id)).toContain('1042');
 
     act(() => screen.unmount());
-  });
+    // Same shape as the already-fixed cold-start files (HomeScreen.gpsFallback.test.tsx,
+    // submitPayment.e2e.test.tsx) -- a single test driving a real 3-step wizard through a
+    // real store/thunk, comfortably over Jest's 5000ms default on a shared/loaded runner.
+  }, 20000);
 });

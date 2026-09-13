@@ -183,5 +183,8 @@ describe('Team Lead dashboard after EOD (ATT-017)', () => {
     expect(problems).toEqual([]);
 
     act(() => tree.unmount());
-  });
+    // Same shape as the already-fixed cold-start files (HomeScreen.gpsFallback.test.tsx,
+    // submitPayment.e2e.test.tsx) -- a single test paying the file's full cold-start cost,
+    // comfortably over Jest's 5000ms default on a shared/loaded runner.
+  }, 20000);
 });

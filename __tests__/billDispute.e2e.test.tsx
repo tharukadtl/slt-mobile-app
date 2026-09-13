@@ -251,5 +251,9 @@ describe('FLT-023 — client reports an issue on a bill, end to end', () => {
     expect(inHistoryList(issues, ISSUE_ID)).toBe(false);
 
     act(() => tree.unmount());
-  });
+    // A full Redux+thunk round trip (fetch bill, fetch issues twice, report a dispute) driving
+    // a real component tree, same shape as the already-fixed cold-start files
+    // (HomeScreen.gpsFallback.test.tsx, submitPayment.e2e.test.tsx) -- comfortably over Jest's
+    // 5000ms default on a shared/loaded runner.
+  }, 20000);
 });
